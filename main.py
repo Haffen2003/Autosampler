@@ -1,10 +1,18 @@
 import json
 import os
-import serial
-import time
+# serial communication replaced by Moonraker HTTP API
+import requests
 import traceback
 from kivy.config import Config
 Config.set('graphics', 'fullscreen', 'auto')
+
+# base directories for resources
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ICON_DIR = os.path.join(BASE_DIR, "Icons")
+
+def icon(name):
+    """Return full path to an icon file located in the Icons folder."""
+    return os.path.join(ICON_DIR, name)
 
 
 from kivy.core.window import Window
@@ -128,36 +136,28 @@ class CocktailInputScreen(Screen):
 
 
 
-class SerialManager:
-    _instance = None
+# Moonraker client replaces direct serial communication.
+class MoonrakerClient:
+    def __init__(self, base_url="http://localhost:7125"):
+        self.base_url = base_url.rstrip('/')
 
-    def __init__(self, port='COM5', baudrate=115200):
+    def send_gcode(self, gcode: str):
+        """Send a G-code string to the printer via Moonraker.
+
+        Uses the /printer/gcode/script endpoint which executes the script on the
+        Klipper MCU.  Errors are printed to stdout but not raised, as this is a
+        UI application where we don't want exceptions bubbling up.
+        """
+        url = f"{self.base_url}/printer/gcode/script"
         try:
-            self.ser = serial.Serial(port, baudrate, timeout=2)
-            time.sleep(2)
-            print(f"[INFO] Serielle Verbindung geöffnet: {port}")
+            resp = requests.post(url, json={"script": gcode}, timeout=5)
+            if resp.status_code != 204 and resp.status_code != 200:
+                print(f"[ERROR] Moonraker responded {resp.status_code}: {resp.text}")
         except Exception as e:
-            print(f"[ERROR] Serielle Verbindung fehlgeschlagen: {e}")
-            self.ser = None
+            print(f"[ERROR] Failed to send G-code via Moonraker: {e}")
 
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = SerialManager()
-        return cls._instance
-
-    def send(self, command):
-        if self.ser and self.ser.is_open:
-            try:
-                self.ser.write((command + '\n').encode('utf-8'))
-                print(f"[SEND] → {command}")
-                response = self.ser.readline().decode('utf-8').strip()
-                print(f"[RECV] ← {response}")
-                return response
-            except Exception as e:
-                print(f"[ERROR] Senden fehlgeschlagen: {e}")
-        else:
-            print("[WARN] Serielle Verbindung nicht verfügbar.")
+# singleton instance for convenience
+moonraker = MoonrakerClient()
 
 
 
@@ -298,8 +298,8 @@ class PreparationScreen(Screen):
                 size_hint=(None, None),
                 size=(40, 40),
                 pos_hint={'center_x': 0.5, 'center_y': 0.5},
-                background_normal='C:/Users/jonas/Desktop/MotorApp/Icons/stift.40.png',
-                background_down='C:/Users/jonas/Desktop/MotorApp/Icons/stift.40.png',
+                background_normal=icon('stift.40.png'),
+                background_down=icon('stift.40.png'),
                 background_color=(1, 1, 1, 1)  # Immer sichtbar
             )
             activate_btn.bind(on_press=partial(self.set_active_color, name=i['name'], color=i.get('color', [1, 0, 0, 1])))
@@ -319,8 +319,8 @@ class PreparationScreen(Screen):
             delete_btn = Button(
                 size_hint=(None, None),
                 size=(40, 40),
-                background_normal='C:/Users/jonas/Desktop/MotorApp/Icons/müll.40.png',
-                background_down='C:/Users/jonas/Desktop/MotorApp/Icons/müll.40.png'
+                background_normal=icon('müll.40.png'),
+                background_down=icon('müll.40.png')
             )
             delete_btn.row = row  # Verknüpfe Button mit Zeile
             delete_btn.bind(on_press=self.remove_row)
@@ -419,8 +419,9 @@ class MotorPositionScreen(Screen):
         input_area = BoxLayout(orientation='horizontal', size_hint=(1, None), height=70, spacing=20, padding=[20, 10, 20, 10])
         input_area.pos_hint = {'x': 0, 'y': 0.08}
 
-        self.x_input = TextInput(hint_text="X Steps", multiline=False, size_hint=(None, 1), width=200, font_size=18)
-        self.y_input = TextInput(hint_text="Y Steps", multiline=False, size_hint=(None, 1), width=200, font_size=18)
+        # Inputs now reflect physical coordinates (e.g. mm) for Klipper G-code
+        self.x_input = TextInput(hint_text="X position", multiline=False, size_hint=(None, 1), width=200, font_size=18)
+        self.y_input = TextInput(hint_text="Y position", multiline=False, size_hint=(None, 1), width=200, font_size=18)
 
         save_btn = Button(text="Speichern", size_hint=(None, 1), width=150, font_size=18)
         send_btn = Button(text="Senden", size_hint=(None, 1), width=150, font_size=18)
@@ -433,28 +434,11 @@ class MotorPositionScreen(Screen):
         input_area.add_widget(send_btn)
         self.layout.add_widget(input_area)
 
-        # Steuerung + Geschwindigkeit unten rechts
-        control_area = BoxLayout(orientation='vertical', size_hint=(None, None), size=(250, 280), spacing=15)
-        control_area.pos_hint = {'right': 1, 'y': 0.08}
-
-        self.speed_input = TextInput(hint_text="Geschwindigkeit", multiline=False, size_hint=(1, None), height=50, font_size=18)
-        send_speed_btn = Button(text="Speed senden", size_hint=(1, None), height=50, font_size=18)
-        send_speed_btn.bind(on_press=self.send_speed)
-
-        btn_forward = Button(text='Vorwärts', size_hint=(1, None), height=50, font_size=18)
-        btn_backward = Button(text='Rückwärts', size_hint=(1, None), height=50, font_size=18)
-        btn_stop = Button(text='Stopp', size_hint=(1, None), height=50, font_size=18)
-
-        btn_forward.bind(on_press=lambda x: self.send_serial("FORWARD"))
-        btn_backward.bind(on_press=lambda x: self.send_serial("BACKWARD"))
-        btn_stop.bind(on_press=lambda x: self.send_serial("STOP"))
-
-        control_area.add_widget(self.speed_input)
-        control_area.add_widget(send_speed_btn)
-        control_area.add_widget(btn_forward)
-        control_area.add_widget(btn_backward)
-        control_area.add_widget(btn_stop)
-        self.layout.add_widget(control_area)
+        # Steuerung / Toolhead-Menü unten rechts
+        # wir nutzen jetzt die spezialisierte MotorControlMenu-Klasse
+        self.control_area = MotorControlMenu(size_hint=(None, None), size=(250, 280))
+        self.control_area.pos_hint = {'right': 1, 'y': 0.08}
+        self.layout.add_widget(self.control_area)
 
         self.add_widget(self.layout)
 
@@ -478,31 +462,32 @@ class MotorPositionScreen(Screen):
 
     def save_position(self, instance):
         if self.selected_circle:
+            # allow float values for more precision
+            try:
+                x = float(self.x_input.text)
+                y = float(self.y_input.text)
+            except ValueError:
+                print("[WARN] Ungültige Koordinaten.")
+                return
             self.positions[str(self.selected_circle.index)] = {
-                "x": int(self.x_input.text),
-                "y": int(self.y_input.text)
+                "x": x,
+                "y": y
             }
             self.store_positions()
-            print(f"[SAVE] Slot {self.selected_circle.index} → X={self.x_input.text}, Y={self.y_input.text}")
+            print(f"[SAVE] Slot {self.selected_circle.index} → X={x}, Y={y}")
 
     def send_position(self, instance):
+        # when using Klipper, send a G‑code move command to the stored coordinates
         if self.selected_circle:
             pos = self.positions.get(str(self.selected_circle.index))
             if pos:
-                command = f"MOVE X={pos['x']} Y={pos['y']}"
+                command = f"G1 X{pos['x']} Y{pos['y']}"
                 self.send_serial(command)
 
-    def send_speed(self, instance):
-        speed = self.speed_input.text.strip()
-        if speed.isdigit():
-            command = f"SPEED={speed}"
-            self.send_serial(command)
-            print(f"[SEND] Geschwindigkeit gesetzt: {speed}")
-        else:
-            print("[WARN] Ungültige Eingabe für Geschwindigkeit.")
 
     def send_serial(self, command):
-        SerialManager.get_instance().send(command)
+        # wojrk with moonraker
+        moonraker.send_gcode(command)
 
     def load_positions(self):
         if os.path.exists("positions.json"):
@@ -525,6 +510,67 @@ class PumpScreen(Screen):
         # Hauptlayout
         self.layout = FloatLayout()
         self.add_widget(self.layout)
+
+
+
+# missing in original code; provide a simple placeholder so the screen can be constructed
+class MotorControlMenu(BoxLayout):
+    """Repräsentiert das Toolhead-Menü mit Achsenpositionen und Schritten.
+
+    Die Felder sind editierbar und es gibt Buttons zum Relativbewegen der
+    Achsen. Bei Knopfdruck wird ein G-Code-Befehl über die serielle
+    Verbindung gesendet.  Diese Klasse wird im Motor-Tab rechts unten
+    eingeblendet.  """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.orientation = 'vertical'
+        self.padding = 10
+        self.spacing = 4
+
+        # Kopfzeile
+        self.add_widget(Label(text="Toolhead", size_hint=(1, None), height=30, font_size=20))
+        self.add_widget(Label(text="Position: absolute", size_hint=(1, None), height=20))
+
+        # Eingabefelder und Buttons für X/Y/Z
+        axes = ['X', 'Y', 'Z']
+        self.axis_inputs = {}
+        for axis in axes:
+            container = BoxLayout(orientation='vertical', size_hint=(1, None), height=90, spacing=2)
+
+            row1 = BoxLayout(orientation='horizontal', size_hint=(1, None), height=30)
+            row1.add_widget(Label(text=axis, size_hint=(None, 1), width=20))
+            inp = TextInput(text="", multiline=False, size_hint=(1, 1), font_size=16)
+            self.axis_inputs[axis] = inp
+            row1.add_widget(inp)
+            container.add_widget(row1)
+
+            # Buttonschicht mit verschiedenen Schritten
+            btn_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=30, spacing=2)
+            for delta in [-100, -10, -1, 1, 10, 100]:
+                btn = Button(text=str(delta), size_hint=(None, None), size=(40, 30), font_size=14)
+                btn.axis = axis
+                btn.delta = delta
+                btn.bind(on_press=self.on_increment)
+                btn_row.add_widget(btn)
+            container.add_widget(btn_row)
+
+            self.add_widget(container)
+
+    def on_increment(self, instance):
+        axis = instance.axis
+        delta = instance.delta
+        inp = self.axis_inputs.get(axis)
+        try:
+            current = float(inp.text) if inp.text else 0.0
+        except ValueError:
+            current = 0.0
+        new_val = current + delta
+        inp.text = str(new_val)
+        # sende relativen G-Code über die serielle Schnittstelle
+        # use moonraker client to send relative move
+        moonraker.send_gcode("G91")
+        moonraker.send_gcode(f"G0 {axis}{delta}")
+        moonraker.send_gcode("G90")
 
 
 class HomeScreen(Screen):
@@ -560,8 +606,8 @@ class MainScreen(BoxLayout):
         home_btn = Button(
             size_hint=(None, None),
             size=(64, 64),
-            background_normal='C:/Users/jonas/Desktop/MotorApp/Icons/home.64.png',
-            background_down='C:/Users/jonas/Desktop/MotorApp/Icons/home.64.png',
+            background_normal=icon('home.64.png'),
+            background_down=icon('home.64.png'),
             pos_hint={'center_x': 0.5},
             on_press=lambda x: self.switch_screen("home")
         )
@@ -576,8 +622,8 @@ class MainScreen(BoxLayout):
         motor_btn = Button(
             size_hint=(None, None),
             size=(64, 64),
-            background_normal='C:/Users/jonas/Desktop/MotorApp/Icons/motor.64.png',
-            background_down='C:/Users/jonas/Desktop/MotorApp/Icons/motor.64.png',
+            background_normal=icon('motor.64.png'),
+            background_down=icon('motor.64.png'),
             pos_hint={'center_x': 0.5},
             on_press=lambda x: self.switch_screen("motor")
         )
@@ -591,8 +637,8 @@ class MainScreen(BoxLayout):
         pump_btn = Button(
             size_hint=(None, None),
             size=(64, 64),
-            background_normal='C:/Users/jonas/Desktop/MotorApp/Icons/pump.64.png',
-            background_down='C:/Users/jonas/Desktop/MotorApp/Icons/pump.64.png',
+            background_normal=icon('pump.64.png'),
+            background_down=icon('pump.64.png'),
             pos_hint={'center_x': 0.5},
             on_press=lambda x: self.switch_screen("pump")
         )
@@ -607,8 +653,8 @@ class MainScreen(BoxLayout):
         cocktail_btn = Button(
             size_hint=(None, None),
             size=(64, 64),
-            background_normal='C:/Users/jonas/Desktop/MotorApp/Icons/cocktail.64.png',
-            background_down='C:/Users/jonas/Desktop/MotorApp/Icons/cocktail.64.png',
+            background_normal=icon('cocktail.64.png'),
+            background_down=icon('cocktail.64.png'),
             pos_hint={'center_x': 0.5},
             on_press=lambda x: self.switch_screen("cocktail")
         )
@@ -622,8 +668,8 @@ class MainScreen(BoxLayout):
         prep_btn = Button(
             size_hint=(None, None),
             size=(64, 64),
-            background_normal='C:/Users/jonas/Desktop/MotorApp/Icons/shaker.64.png',
-            background_down='C:/Users/jonas/Desktop/MotorApp/Icons/shaker.64.png',
+            background_normal=icon('shaker.64.png'),
+            background_down=icon('shaker.64.png'),
             pos_hint={'center_x': 0.5},
             on_press=lambda x: self.switch_screen("prep")
         )
