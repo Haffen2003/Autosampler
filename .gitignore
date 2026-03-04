@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+cocktails.json
+positions.json
+*.vscode/
+*.idea/
+.DS_Store
+Thumbs.db
