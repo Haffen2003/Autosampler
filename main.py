@@ -73,6 +73,22 @@ def background_image(name):
     logging.info(f'Background image found: {path}')
     return path
 
+def apply_widget_background(widget, name='Schwarz.jpg'):
+    """Apply a scalable background image to a widget canvas."""
+    bg_path = background_image(name)
+    if not bg_path:
+        return
+
+    with widget.canvas.before:
+        widget.bg_rect = Rectangle(source=bg_path, pos=widget.pos, size=widget.size)
+
+    def _update_bg(instance, _value):
+        if hasattr(instance, 'bg_rect'):
+            instance.bg_rect.pos = instance.pos
+            instance.bg_rect.size = instance.size
+
+    widget.bind(pos=_update_bg, size=_update_bg)
+
 from kivy.core.window import Window
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -87,8 +103,6 @@ from kivy.uix.widget import Widget
 from kivy.graphics import Color, Ellipse, Rectangle
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
-from kivy.uix.image import Image
-from kivy.core.image import Image as CoreImage
 
 data_file = "cocktails.json"
 
@@ -118,6 +132,7 @@ def load_cocktails():
 class CocktailInputScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        apply_widget_background(self)
         self.cocktail_data = load_cocktails()
         self.ingredients = []
 
@@ -284,6 +299,7 @@ class CircleButton(Widget):
 class PreparationScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        apply_widget_background(self)
         self.cocktail_data = load_cocktails()
         self.active_color = None
         self.active_ingredient_name = None
@@ -477,6 +493,7 @@ class PreparationScreen(Screen):
 class MotorPositionScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        apply_widget_background(self)
         self.positions = self.load_positions()
         self.selected_circle = None
 
@@ -588,6 +605,7 @@ class MotorPositionScreen(Screen):
 class PumpScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        apply_widget_background(self)
         self.layout = FloatLayout()
         self.add_widget(self.layout)
 
@@ -596,13 +614,17 @@ class PumpScreen(Screen):
 class HomeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        apply_widget_background(self)
         self.layout = FloatLayout()
         self.add_widget(self.layout)
 
 class EinstellungScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.add_widget(MotorControlMenu())
+        apply_widget_background(self)
+        layout = FloatLayout()
+        layout.add_widget(Label(text="Einstellungen", pos_hint={'center_x': 0.5, 'center_y': 0.5}))
+        self.add_widget(layout)
 
 class MainScreen(BoxLayout):
     def __init__(self, **kwargs):
