@@ -78,9 +78,18 @@ def apply_widget_background(widget, name='Schwarz.jpg'):
     bg_path = background_image(name)
     if not bg_path:
         return
+    from kivy.core.image import Image as CoreImage
+
+    try:
+        texture = CoreImage(bg_path).texture
+        logging.info(f'Background texture loaded: {texture.size} from {bg_path}')
+    except Exception as e:
+        logging.error(f'Failed to decode background image: {bg_path} ({e})')
+        return
 
     with widget.canvas.before:
-        widget.bg_rect = Rectangle(source=bg_path, pos=widget.pos, size=widget.size)
+        Color(1, 1, 1, 1)
+        widget.bg_rect = Rectangle(texture=texture, pos=widget.pos, size=widget.size)
 
     def _update_bg(instance, _value):
         if hasattr(instance, 'bg_rect'):
