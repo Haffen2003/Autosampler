@@ -59,7 +59,7 @@ from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.widget import Widget
-from kivy.graphics import Color, Ellipse
+from kivy.graphics import Color, Ellipse, Rectangle
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
 
@@ -266,13 +266,19 @@ class PreparationScreen(Screen):
         self.layout = FloatLayout()
 
         # Inhaltsbereich oben
-        content_height = Window.height * 0.65
+        content_height = Window.height * 0.6
         scroll_height = content_height - 50
 
         self.content_area = BoxLayout(orientation='vertical', size_hint=(1, None), height=content_height, pos_hint={'top': 1})
+        
+        # Ensure spinner always has values and a valid initial selection
+        cocktail_names = list(self.cocktail_data.keys())
+        if not cocktail_names:
+            cocktail_names = ["Keine Cocktails verfügbar"]
+        
         self.spinner = Spinner(
             text="Cocktail auswählen",
-            values=list(self.cocktail_data.keys()),
+            values=cocktail_names,
             size_hint_y=None,
             height=50,
             font_size=18
@@ -290,9 +296,9 @@ class PreparationScreen(Screen):
         self.layout.add_widget(self.content_area)
 
         # Kreise unten mittig
-        circle_width = min(Window.width * 0.8, 700)
-        self.slot_area = GridLayout(cols=5, spacing=[20, 20], size_hint=(None, None), size=(circle_width, circle_width * 0.6))
-        self.slot_area.pos_hint = {'center_x': 0.5, 'y': 0.02}
+        circle_width = min(Window.width * 0.9, 600)
+        self.slot_area = GridLayout(cols=5, spacing=[8, 8], size_hint=(None, None), size=(circle_width, circle_width * 0.5))
+        self.slot_area.pos_hint = {'center_x': 0.5, 'y': 0.01}
         self.draw_circles()
         self.layout.add_widget(self.slot_area)
 
@@ -302,6 +308,10 @@ class PreparationScreen(Screen):
         """Load ingredients with race condition protection."""
         if self._loading_ingredients:
             logging.warning('Already loading ingredients, skipping')
+            return
+        
+        # Skip if no cocktails available or initial text
+        if text == "Cocktail auswählen" or text == "Keine Cocktails verfügbar":
             return
         
         self._loading_ingredients = True
@@ -315,54 +325,72 @@ class PreparationScreen(Screen):
 
             # Neue Zutaten hinzufügen
             ingredients = self.cocktail_data.get(text, [])
+            if not ingredients:
+                logging.warning(f'No ingredients found for cocktail: {text}')
+                self.ingredients_area.add_widget(Label(text="Keine Zutaten verfügbar", size_hint_y=None, height=50, color=[1, 1, 1, 1]))
+                self._loading_ingredients = False
+                return
+            
             for i in ingredients:
-                row = BoxLayout(size_hint_y=None, height=50, spacing=10, padding=[5, 5, 5, 5])
-                row.ingredient_name = i['name']
+                try:
+                    # Validate ingredient structure
+                    if not isinstance(i, dict) or 'name' not in i or 'amount' not in i:
+                        logging.warning(f'Invalid ingredient structure: {i}')
+                        continue
+                    
+                    row = BoxLayout(size_hint_y=None, height=50, spacing=10, padding=[5, 5, 5, 5])
+                    row.ingredient_name = i['name']
 
-                bg_box = FloatLayout(size_hint=(None, None), size=(40, 40))
-                with bg_box.canvas.before:
-                    Color(0.2, 0.2, 0.2, 1)
-                    rect = Rectangle(pos=bg_box.pos, size=bg_box.size)
-                    bg_box.rect = rect
+                    bg_box = FloatLayout(size_hint=(None, None), size=(40, 40))
+                    with bg_box.canvas.before:
+                        Color(0.2, 0.2, 0.2, 1)
+                        rect = Rectangle(pos=bg_box.pos, size=bg_box.size)
+                        bg_box.rect = rect
 
-                bg_box.bind(pos=lambda inst, val: setattr(inst.rect, 'pos', inst.pos))
-                bg_box.bind(size=lambda inst, val: setattr(inst.rect, 'size', inst.size))
+                    bg_box.bind(pos=lambda inst, val: setattr(inst.rect, 'pos', inst.pos))
+                    bg_box.bind(size=lambda inst, val: setattr(inst.rect, 'size', inst.size))
 
-                activate_btn = Button(
-                    size_hint=(None, None),
-                    size=(40, 40),
-                    pos_hint={'center_x': 0.5, 'center_y': 0.5},
-                    background_normal=icon('stift.40.png'),
-                    background_down=icon('stift.40.png'),
-                    background_color=(1, 1, 1, 1)
-                )
-                activate_btn.bind(on_press=partial(self.set_active_color, name=i['name'], color=i.get('color', [1, 0, 0, 1])))
-                row.activate_btn = activate_btn
-                bg_box.add_widget(activate_btn)
+                    stift_icon = icon('stift.40.png')
+                    activate_btn = Button(
+                        size_hint=(None, None),
+                        size=(40, 40),
+                        pos_hint={'center_x': 0.5, 'center_y': 0.5},
+                        background_normal=stift_icon if stift_icon else '',
+                        background_down=stift_icon if stift_icon else '',
+                        background_color=(1, 1, 1, 1)
+                    )
+                    activate_btn.bind(on_press=partial(self.set_active_color, name=i['name'], color=i.get('color', [1, 0, 0, 1])))
+                    row.activate_btn = activate_btn
+                    bg_box.add_widget(activate_btn)
 
-                label = Label(
-                    text=f"{i['name']}: {i['amount']} ml",
-                    size_hint_x=1,
-                    halign='left',
-                    valign='middle',
-                    color=[1, 1, 1, 1],
-                    font_size=16
-                )
-                label.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
+                    label = Label(
+                        text=f"{i['name']}: {i['amount']} ml",
+                        size_hint_x=1,
+                        halign='left',
+                        valign='middle',
+                        color=[1, 1, 1, 1],
+                        font_size=16
+                    )
+                    label.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
 
-                delete_btn = Button(
-                    size_hint=(None, None),
-                    size=(40, 40),
-                    background_normal=icon('müll.40.png'),
-                    background_down=icon('müll.40.png')
-                )
-                delete_btn.row = row
-                delete_btn.bind(on_press=self.remove_row)
+                    muell_icon = icon('müll.40.png')
+                    delete_btn = Button(
+                        size_hint=(None, None),
+                        size=(40, 40),
+                        background_normal=muell_icon if muell_icon else '',
+                        background_down=muell_icon if muell_icon else ''
+                    )
+                    delete_btn.row = row
+                    delete_btn.bind(on_press=self.remove_row)
 
-                row.add_widget(bg_box)
-                row.add_widget(label)
-                row.add_widget(delete_btn)
-                self.ingredients_area.add_widget(row)
+                    row.add_widget(bg_box)
+                    row.add_widget(label)
+                    row.add_widget(delete_btn)
+                    self.ingredients_area.add_widget(row)
+                except KeyError as e:
+                    logging.error(f'KeyError processing ingredient: {e}, ingredient: {i}')
+                except Exception as e:
+                    logging.error(f'Error processing ingredient {i}: {e}')
         finally:
             self._loading_ingredients = False
 
@@ -425,44 +453,46 @@ class MotorPositionScreen(Screen):
         self.positions = self.load_positions()
         self.selected_circle = None
 
-        self.layout = FloatLayout()
+        self.layout = BoxLayout(orientation='vertical', padding=5, spacing=5)
 
-        # Kreise mittig zentriert
-        self.slot_area = GridLayout(cols=5, spacing=[30, 30], size_hint=(None, None), size=(700, 500))
-        self.slot_area.pos_hint = {'center_x': 0.5, 'center_y': 0.65}
+        # Kreise oben
+        self.slot_area = GridLayout(cols=5, spacing=[10, 10], size_hint=(1, 0.6), padding=5)
         self.draw_circles()
         self.layout.add_widget(self.slot_area)
 
-        # Beschriftung über den Eingabefeldern
-        label_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=40, padding=[20, 0, 20, 0], spacing=20)
-        label_row.pos_hint = {'x': 0, 'y': 0.18}
-        label_row.add_widget(Label(text="X-Achse", size_hint=(None, 1), width=200, font_size=18))
-        label_row.add_widget(Label(text="Y-Achse", size_hint=(None, 1), width=200, font_size=18))
-        label_row.add_widget(Label(text="", size_hint=(1, 1)))
-        self.layout.add_widget(label_row)
+        # Eingabefelder und Buttons unten
+        input_area = BoxLayout(orientation='horizontal', size_hint=(1, 0.4), spacing=5, padding=5)
 
-        # Eingabefelder + Buttons unten links
-        input_area = BoxLayout(orientation='horizontal', size_hint=(1, None), height=70, spacing=20, padding=[20, 10, 20, 10])
-        input_area.pos_hint = {'x': 0, 'y': 0.08}
+        # Linke Seite: Eingabefelder
+        input_box = BoxLayout(orientation='vertical', size_hint=(0.6, 1), spacing=3)
+        
+        x_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=35, spacing=3)
+        x_row.add_widget(Label(text="X:", size_hint=(None, 1), width=30, font_size=14))
+        self.x_input = TextInput(hint_text="X", multiline=False, size_hint=(1, 1), font_size=12)
+        x_row.add_widget(self.x_input)
+        input_box.add_widget(x_row)
+        
+        y_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=35, spacing=3)
+        y_row.add_widget(Label(text="Y:", size_hint=(None, 1), width=30, font_size=14))
+        self.y_input = TextInput(hint_text="Y", multiline=False, size_hint=(1, 1), font_size=12)
+        y_row.add_widget(self.y_input)
+        input_box.add_widget(y_row)
+        
+        input_area.add_widget(input_box)
 
-        self.x_input = TextInput(hint_text="X position", multiline=False, size_hint=(None, 1), width=200, font_size=18)
-        self.y_input = TextInput(hint_text="Y position", multiline=False, size_hint=(None, 1), width=200, font_size=18)
-
-        save_btn = Button(text="Speichern", size_hint=(None, 1), width=150, font_size=18)
-        send_btn = Button(text="Senden", size_hint=(None, 1), width=150, font_size=18)
+        # Rechte Seite: Buttons
+        button_box = BoxLayout(orientation='vertical', size_hint=(0.4, 1), spacing=3)
+        
+        save_btn = Button(text="Speichern", size_hint=(1, 0.5), font_size=12)
         save_btn.bind(on_press=self.save_position)
+        button_box.add_widget(save_btn)
+        
+        send_btn = Button(text="Senden", size_hint=(1, 0.5), font_size=12)
         send_btn.bind(on_press=self.send_position)
-
-        input_area.add_widget(self.x_input)
-        input_area.add_widget(self.y_input)
-        input_area.add_widget(save_btn)
-        input_area.add_widget(send_btn)
+        button_box.add_widget(send_btn)
+        
+        input_area.add_widget(button_box)
         self.layout.add_widget(input_area)
-
-        # Steuerung / Toolhead-Menü unten rechts
-        self.control_area = MotorControlMenu(size_hint=(None, None), size=(250, 280))
-        self.control_area.pos_hint = {'right': 1, 'y': 0.08}
-        self.layout.add_widget(self.control_area)
 
         self.add_widget(self.layout)
 
@@ -534,55 +564,7 @@ class PumpScreen(Screen):
         self.layout = FloatLayout()
         self.add_widget(self.layout)
 
-class MotorControlMenu(BoxLayout):
-    """Toolhead control menu with axis positions and step controls."""
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.orientation = 'vertical'
-        self.padding = 10
-        self.spacing = 4
 
-        self.add_widget(Label(text="Toolhead", size_hint=(1, None), height=30, font_size=20))
-        self.add_widget(Label(text="Position: absolute", size_hint=(1, None), height=20))
-
-        axes = ['X', 'Y', 'Z']
-        self.axis_inputs = {}
-        for axis in axes:
-            container = BoxLayout(orientation='vertical', size_hint=(1, None), height=90, spacing=2)
-
-            row1 = BoxLayout(orientation='horizontal', size_hint=(1, None), height=30)
-            row1.add_widget(Label(text=axis, size_hint=(None, 1), width=20))
-            inp = TextInput(text="", multiline=False, size_hint=(1, 1), font_size=16)
-            self.axis_inputs[axis] = inp
-            row1.add_widget(inp)
-            container.add_widget(row1)
-
-            btn_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=30, spacing=2)
-            for delta in [-100, -10, -1, 1, 10, 100]:
-                btn = Button(text=str(delta), size_hint=(None, None), size=(40, 30), font_size=14)
-                btn.axis = axis
-                btn.delta = delta
-                btn.bind(on_press=self.on_increment)
-                btn_row.add_widget(btn)
-            container.add_widget(btn_row)
-
-            self.add_widget(container)
-
-    def on_increment(self, instance):
-        axis = instance.axis
-        delta = instance.delta
-        inp = self.axis_inputs.get(axis)
-        try:
-            current = float(inp.text) if inp.text else 0.0
-        except ValueError:
-            current = 0.0
-        new_val = current + delta
-        inp.text = str(new_val)
-        
-        # Send relative G-code
-        moonraker.send_gcode("G91")
-        moonraker.send_gcode(f"G0 {axis}{delta}")
-        moonraker.send_gcode("G90")
 
 class HomeScreen(Screen):
     def __init__(self, **kwargs):
