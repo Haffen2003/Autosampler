@@ -59,6 +59,13 @@ def background_image(name):
     logging.info(f'Looking for background image: {name} in {BACKGROUND_DIR}')
     path = os.path.join(BACKGROUND_DIR, name)
     if not os.path.exists(path):
+        fallback_names = ['Schwarz.png', 'Schwarz.jpg', 'schwarz.png', 'schwarz.jpg']
+        for fallback in fallback_names:
+            fallback_path = os.path.join(BACKGROUND_DIR, fallback)
+            if os.path.exists(fallback_path):
+                logging.info(f'Background fallback found: {fallback_path}')
+                return fallback_path
+
         logging.error(f'Background image not found: {path}')
         # Try to list what files are actually in the Background directory
         try:
@@ -73,7 +80,7 @@ def background_image(name):
     logging.info(f'Background image found: {path}')
     return path
 
-def apply_widget_background(widget, name='Schwarz.jpg'):
+def apply_widget_background(widget, name='Schwarz.png'):
     """Apply a scalable background image to a widget canvas."""
     bg_path = background_image(name)
     if not bg_path:
@@ -167,7 +174,6 @@ def load_cocktails():
 class CocktailInputScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        apply_widget_background(self)
         self.cocktail_data = load_cocktails()
         self.ingredients = []
 
@@ -334,7 +340,6 @@ class CircleButton(Widget):
 class PreparationScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        apply_widget_background(self)
         self.cocktail_data = load_cocktails()
         self.active_color = None
         self.active_ingredient_name = None
@@ -528,7 +533,6 @@ class PreparationScreen(Screen):
 class MotorPositionScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        apply_widget_background(self)
         self.positions = self.load_positions()
         self.selected_circle = None
 
@@ -640,7 +644,6 @@ class MotorPositionScreen(Screen):
 class PumpScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        apply_widget_background(self)
         self.layout = FloatLayout()
         self.add_widget(self.layout)
 
@@ -649,14 +652,12 @@ class PumpScreen(Screen):
 class HomeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        apply_widget_background(self)
         self.layout = FloatLayout()
         self.add_widget(self.layout)
 
 class EinstellungScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        apply_widget_background(self)
         layout = FloatLayout()
         layout.add_widget(Label(text="Einstellungen", pos_hint={'center_x': 0.5, 'center_y': 0.5}))
         self.add_widget(layout)
@@ -665,20 +666,8 @@ class MainScreen(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.orientation = 'horizontal'
-        
-        # Add background image
-        bg_path = background_image('Schwarz.jpg')
-        if bg_path:
-            try:
-                with self.canvas.before:
-                    self.bg_rect = Rectangle(source=bg_path, pos=self.pos, size=self.size)
-                self.bind(pos=self.update_bg, size=self.update_bg)
-                logging.info(f'Background image loaded successfully: {bg_path}')
-            except Exception as e:
-                logging.error(f'Error loading background image: {e}')
-        else:
-            logging.warning('No background image loaded - using default black background')
-        
+        apply_widget_background(self, 'Schwarz.png')
+
         self.sidebar_container = AnchorLayout(anchor_y='center', size_hint=(None, 1), width=100)
         self.sidebar = BoxLayout(orientation='vertical', size_hint=(None, None))
         self.sidebar.bind(minimum_height=self.sidebar.setter('height'))
@@ -775,12 +764,6 @@ class MainScreen(BoxLayout):
 
     def switch_screen(self, name):
         self.screen_manager.current = name
-    
-    def update_bg(self, *args):
-        """Update background image position and size."""
-        if hasattr(self, 'bg_rect'):
-            self.bg_rect.pos = self.pos
-            self.bg_rect.size = self.size
 
 class CocktailApp(App):
     def build(self):
