@@ -39,12 +39,21 @@ MOONRAKER_URL = CONFIG.get('moonraker_url', 'http://localhost:7125')
 # base directories for resources
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(BASE_DIR, CONFIG.get('icon_dir', 'Icons'))
+BACKGROUND_DIR = os.path.join(BASE_DIR, 'Background')
 
 def icon(name):
     """Return full path to an icon file located in the Icons folder with validation."""
     path = os.path.join(ICON_DIR, name)
     if not os.path.exists(path):
         logging.warning(f'Icon not found: {path}')
+        return ""
+    return path
+
+def background_image(name):
+    """Return full path to a background image file with validation."""
+    path = os.path.join(BACKGROUND_DIR, name)
+    if not os.path.exists(path):
+        logging.warning(f'Background image not found: {path}')
         return ""
     return path
 
@@ -62,6 +71,8 @@ from kivy.uix.widget import Widget
 from kivy.graphics import Color, Ellipse, Rectangle
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
+from kivy.uix.image import Image
+from kivy.core.image import Image as CoreImage
 
 data_file = "cocktails.json"
 
@@ -298,7 +309,7 @@ class PreparationScreen(Screen):
         # Kreise unten mittig
         circle_width = min(Window.width * 0.9, 600)
         self.slot_area = GridLayout(cols=5, spacing=[8, 8], size_hint=(None, None), size=(circle_width, circle_width * 0.5))
-        self.slot_area.pos_hint = {'center_x': 0.5, 'y': 0.01}
+        self.slot_area.pos_hint = {'center_x': 0.5, 'y': 0.05}
         self.draw_circles()
         self.layout.add_widget(self.slot_area)
 
@@ -581,6 +592,14 @@ class MainScreen(BoxLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.orientation = 'horizontal'
+        
+        # Add background image
+        bg_path = background_image('Schwarz.jpg')
+        if bg_path:
+            with self.canvas.before:
+                self.bg_rect = Rectangle(source=bg_path, pos=self.pos, size=self.size)
+            self.bind(pos=self.update_bg, size=self.update_bg)
+        
         self.sidebar_container = AnchorLayout(anchor_y='center', size_hint=(None, 1), width=100)
         self.sidebar = BoxLayout(orientation='vertical', size_hint=(None, None))
         self.sidebar.bind(minimum_height=self.sidebar.setter('height'))
@@ -677,6 +696,12 @@ class MainScreen(BoxLayout):
 
     def switch_screen(self, name):
         self.screen_manager.current = name
+    
+    def update_bg(self, *args):
+        """Update background image position and size."""
+        if hasattr(self, 'bg_rect'):
+            self.bg_rect.pos = self.pos
+            self.bg_rect.size = self.size
 
 class CocktailApp(App):
     def build(self):
