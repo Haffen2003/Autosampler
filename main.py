@@ -79,12 +79,38 @@ def apply_widget_background(widget, name='Schwarz.jpg'):
     if not bg_path:
         return
     from kivy.core.image import Image as CoreImage
+    from kivy.graphics.opengl import glGetIntegerv, GL_MAX_TEXTURE_SIZE
+
+    texture_path = bg_path
+    try:
+        max_texture = int(glGetIntegerv(GL_MAX_TEXTURE_SIZE))
+    except Exception:
+        max_texture = 4096
 
     try:
-        texture = CoreImage(bg_path).texture
-        logging.info(f'Background texture loaded: {texture.size} from {bg_path}')
+        pil_image_module = __import__('PIL.Image', fromlist=['Image'])
+        with pil_image_module.open(bg_path) as img:
+            width, height = img.size
+            if width > max_texture or height > max_texture:
+                scale = min(max_texture / width, max_texture / height)
+                new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+                resampling = getattr(pil_image_module, 'Resampling', None)
+                lanczos = resampling.LANCZOS if resampling else getattr(pil_image_module, 'LANCZOS', 1)
+                resized_img = img.resize(new_size, lanczos)
+                resized_path = os.path.join(BACKGROUND_DIR, f"_resized_{name.rsplit('.', 1)[0]}_{new_size[0]}x{new_size[1]}.png")
+                resized_img.save(resized_path, format='PNG')
+                texture_path = resized_path
+                logging.info(f'Background resized for GPU limit {max_texture}: {width}x{height} -> {new_size[0]}x{new_size[1]}')
+    except ModuleNotFoundError:
+        logging.warning('Pillow not installed; cannot resize oversized background image automatically.')
     except Exception as e:
-        logging.error(f'Failed to decode background image: {bg_path} ({e})')
+        logging.error(f'Failed to resize background image: {e}')
+
+    try:
+        texture = CoreImage(texture_path).texture
+        logging.info(f'Background texture loaded: {texture.size} from {texture_path}')
+    except Exception as e:
+        logging.error(f'Failed to decode background image: {texture_path} ({e})')
         return
 
     with widget.canvas.before:
