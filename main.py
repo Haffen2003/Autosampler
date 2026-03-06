@@ -12,8 +12,13 @@ Config.set('graphics', 'fullscreen', 'auto')
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Console output
+        logging.FileHandler('autosampler.log', mode='a', encoding='utf-8')  # File output
+    ]
 )
+logging.info('=== Autosampler Application Starting ===')
 
 # Load configuration
 CONFIG_FILE = "config.json"
