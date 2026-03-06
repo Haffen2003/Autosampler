@@ -51,10 +51,21 @@ def icon(name):
 
 def background_image(name):
     """Return full path to a background image file with validation."""
+    logging.info(f'Looking for background image: {name} in {BACKGROUND_DIR}')
     path = os.path.join(BACKGROUND_DIR, name)
     if not os.path.exists(path):
-        logging.warning(f'Background image not found: {path}')
+        logging.error(f'Background image not found: {path}')
+        # Try to list what files are actually in the Background directory
+        try:
+            if os.path.exists(BACKGROUND_DIR):
+                files = os.listdir(BACKGROUND_DIR)
+                logging.info(f'Files in Background directory: {files}')
+            else:
+                logging.error(f'Background directory does not exist: {BACKGROUND_DIR}')
+        except Exception as e:
+            logging.error(f'Error listing Background directory: {e}')
         return ""
+    logging.info(f'Background image found: {path}')
     return path
 
 from kivy.core.window import Window
@@ -596,9 +607,15 @@ class MainScreen(BoxLayout):
         # Add background image
         bg_path = background_image('Schwarz.jpg')
         if bg_path:
-            with self.canvas.before:
-                self.bg_rect = Rectangle(source=bg_path, pos=self.pos, size=self.size)
-            self.bind(pos=self.update_bg, size=self.update_bg)
+            try:
+                with self.canvas.before:
+                    self.bg_rect = Rectangle(source=bg_path, pos=self.pos, size=self.size)
+                self.bind(pos=self.update_bg, size=self.update_bg)
+                logging.info(f'Background image loaded successfully: {bg_path}')
+            except Exception as e:
+                logging.error(f'Error loading background image: {e}')
+        else:
+            logging.warning('No background image loaded - using default black background')
         
         self.sidebar_container = AnchorLayout(anchor_y='center', size_hint=(None, 1), width=100)
         self.sidebar = BoxLayout(orientation='vertical', size_hint=(None, None))
