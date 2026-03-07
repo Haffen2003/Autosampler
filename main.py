@@ -54,7 +54,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(BASE_DIR, CONFIG.get('icon_dir', 'Icons'))
 BACKGROUND_DIR = os.path.join(BASE_DIR, 'Background')
 COCKTAILS_DIR = os.path.join(BASE_DIR, 'Cocktails')
-COCKTAILS_ICON_DIR = os.path.join(COCKTAILS_DIR, '64_96')
+COCKTAILS_ICON_DIR = os.path.join(COCKTAILS_DIR, '128_192')
 
 
 def pretty_cocktail_name(filename):
@@ -835,7 +835,7 @@ class HomeScreen(Screen):
         root.add_widget(subtitle)
 
         self.grid = GridLayout(
-            cols=5,
+            cols=4,
             spacing=[14, 14],
             padding=[8, 6, 8, 6],
             size_hint_y=None
@@ -868,30 +868,35 @@ class HomeScreen(Screen):
         )
 
         if not icon_files:
-            self.status_label.text = "Keine Cocktail-Icons in Cocktails/64_96 gefunden."
+            self.status_label.text = "Keine Cocktail-Icons in Cocktails/128_192 gefunden."
             return
 
         for icon_file in icon_files:
             card = BoxLayout(
                 orientation='vertical',
                 size_hint=(None, None),
-                size=(150, 142),
+                size=(170, 242),
                 spacing=6,
                 padding=[4, 4, 4, 4]
             )
 
             icon_path = os.path.join(COCKTAILS_ICON_DIR, icon_file)
-            drink_image = Image(
-                source=icon_path,
+            cocktail_button = Button(
+                text="",
                 size_hint=(None, None),
-                size=(96, 96),
-                pos_hint={'center_x': 0.5}
+                size=(128, 192),
+                pos_hint={'center_x': 0.5},
+                background_normal=icon_path,
+                background_down=icon_path,
+                background_color=(1, 1, 1, 1),
+                border=(0, 0, 0, 0)
             )
+            cocktail_button.bind(on_press=partial(self.on_cocktail_icon_pressed, cocktail_name=pretty_cocktail_name(icon_file)))
 
             name_label = Label(
                 text=pretty_cocktail_name(icon_file),
                 size_hint_y=None,
-                height=32,
+                height=36,
                 font_size=16,
                 color=[1, 1, 1, 1],
                 halign='center',
@@ -901,11 +906,14 @@ class HomeScreen(Screen):
             if self.ui_font:
                 name_label.font_name = self.ui_font
 
-            card.add_widget(drink_image)
+            card.add_widget(cocktail_button)
             card.add_widget(name_label)
             self.grid.add_widget(card)
 
         self.status_label.text = f"{len(icon_files)} Cocktails geladen"
+
+    def on_cocktail_icon_pressed(self, _instance, cocktail_name):
+        self.status_label.text = f"Ausgewählt: {cocktail_name}"
 
 class GCodeScreen(Screen):
     def __init__(self, **kwargs):
