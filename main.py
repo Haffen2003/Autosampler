@@ -8,6 +8,8 @@ from functools import partial
 import requests
 from kivy.config import Config
 Config.set('graphics', 'fullscreen', 'auto')
+# Prevent one physical touch from being processed as additional mouse events.
+Config.set('input', 'mouse', 'mouse,disable_multitouch')
 
 # Configure logging
 logging.basicConfig(
