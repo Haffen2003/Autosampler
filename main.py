@@ -2,8 +2,12 @@ import logging
 import json
 import os
 import traceback
-import time
 from functools import partial
+
+# Windows touchscreens can mis-map coordinates when DPI/touch mouse emulation is active.
+os.environ.setdefault('SDL_WINDOWS_DPI_AWARENESS', 'permonitorv2')
+os.environ.setdefault('SDL_MOUSE_TOUCH_EVENTS', '0')
+os.environ.setdefault('SDL_TOUCH_MOUSE_EVENTS', '0')
 
 # serial communication replaced by Moonraker HTTP API
 import requests
@@ -156,30 +160,6 @@ from kivy.clock import Clock
 class Button(KivyButton):
     """Custom button with optional touch padding (0 by default to avoid overlap)."""
     touch_padding = NumericProperty(0)
-    _active_touch_uid = None
-    _active_touch_started = 0.0
-
-    @classmethod
-    def _claim_touch(cls, touch):
-        now = time.monotonic()
-        if cls._active_touch_uid in (None, touch.uid):
-            cls._active_touch_uid = touch.uid
-            cls._active_touch_started = now
-            return True
-
-        # Ignore extra touches while one touch is already active.
-        if now - cls._active_touch_started < 1.0:
-            return False
-
-        cls._active_touch_uid = touch.uid
-        cls._active_touch_started = now
-        return True
-
-    @classmethod
-    def _release_touch(cls, touch):
-        if cls._active_touch_uid == touch.uid:
-            cls._active_touch_uid = None
-            cls._active_touch_started = 0.0
 
     def collide_point(self, x, y):
         padding = float(self.touch_padding)
@@ -187,18 +167,6 @@ class Button(KivyButton):
             self.x - padding <= x <= self.right + padding and
             self.y - padding <= y <= self.top + padding
         )
-
-    def on_touch_down(self, touch):
-        if self.collide_point(*touch.pos):
-            if not self._claim_touch(touch):
-                return True
-        return super().on_touch_down(touch)
-
-    def on_touch_up(self, touch):
-        try:
-            return super().on_touch_up(touch)
-        finally:
-            self._release_touch(touch)
 
 data_file = "cocktails.json"
 
@@ -413,18 +381,10 @@ class CircleButton(Widget):
 
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
-            if not Button._claim_touch(touch):
-                return True
             if callable(self.callback):
                 self.callback(self)
             return True
         return super().on_touch_down(touch)
-
-    def on_touch_up(self, touch):
-        try:
-            return super().on_touch_up(touch)
-        finally:
-            Button._release_touch(touch)
 
     def assign_ingredient(self, name, color):
         self.assigned_ingredient = name
@@ -1045,6 +1005,10 @@ class MainScreen(BoxLayout):
 
 class CocktailApp(App):
     def build(self):
+        try:
+            logging.info(f"Window size={Window.size}, system_size={Window.system_size}, dpi={Window.dpi}")
+        except Exception:
+            pass
         return MainScreen()
 
 if __name__ == "__main__":
