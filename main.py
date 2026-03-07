@@ -134,7 +134,7 @@ def apply_widget_background(widget, name='Schwarz.png'):
 from kivy.core.window import Window
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
+from kivy.uix.button import Button as KivyButton
 from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.spinner import Spinner
@@ -145,6 +145,20 @@ from kivy.uix.widget import Widget
 from kivy.graphics import Color, Ellipse, Rectangle
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
+from kivy.uix.image import Image
+from kivy.properties import NumericProperty
+
+
+class Button(KivyButton):
+    """Button with larger invisible touch hitbox for touch displays."""
+    touch_padding = NumericProperty(12)
+
+    def collide_point(self, x, y):
+        padding = float(self.touch_padding)
+        return (
+            self.x - padding <= x <= self.right + padding and
+            self.y - padding <= y <= self.top + padding
+        )
 
 data_file = "cocktails.json"
 
@@ -538,10 +552,41 @@ class MotorPositionScreen(Screen):
 
         self.layout = BoxLayout(orientation='vertical', padding=5, spacing=5)
 
-        # Kreise oben
-        self.slot_area = GridLayout(cols=5, spacing=[10, 10], size_hint=(1, 0.6), padding=5)
+        # Oberer Bereich: Kreise links, Home-Buttons oben rechts
+        top_area = BoxLayout(orientation='horizontal', size_hint=(1, 0.6), spacing=6, padding=[5, 5, 5, 5])
+
+        self.slot_area = GridLayout(cols=5, spacing=[10, 10], size_hint=(1, 1), padding=5)
         self.draw_circles()
-        self.layout.add_widget(self.slot_area)
+        top_area.add_widget(self.slot_area)
+
+        home_column = BoxLayout(orientation='vertical', size_hint=(None, 1), width=72, spacing=6)
+
+        home_x_btn = Button(text="X", size_hint=(None, None), size=(64, 64), font_size=18)
+        home_y_btn = Button(text="Y", size_hint=(None, None), size=(64, 64), font_size=18)
+        home_z_btn = Button(text="Z", size_hint=(None, None), size=(64, 64), font_size=18)
+        home_all_btn = Button(text="", size_hint=(None, None), size=(64, 64))
+
+        home_all_icon = Image(source=icon('haus.40.png'), size_hint=(None, None), size=(40, 40))
+
+        def update_home_icon(*_args):
+            home_all_icon.center = home_all_btn.center
+
+        home_all_btn.bind(pos=update_home_icon, size=update_home_icon)
+        home_all_btn.add_widget(home_all_icon)
+        update_home_icon()
+
+        home_x_btn.bind(on_press=partial(self.home_axis, axis='X'))
+        home_y_btn.bind(on_press=partial(self.home_axis, axis='Y'))
+        home_z_btn.bind(on_press=partial(self.home_axis, axis='Z'))
+        home_all_btn.bind(on_press=self.home_all_axes)
+
+        home_column.add_widget(home_x_btn)
+        home_column.add_widget(home_y_btn)
+        home_column.add_widget(home_z_btn)
+        home_column.add_widget(home_all_btn)
+
+        top_area.add_widget(home_column)
+        self.layout.add_widget(top_area)
 
         # Eingabefelder und Buttons unten
         input_area = BoxLayout(orientation='horizontal', size_hint=(1, 0.4), spacing=5, padding=5)
@@ -622,6 +667,17 @@ class MotorPositionScreen(Screen):
             else:
                 logging.warning(f"No position saved for slot {self.selected_circle.index}")
 
+    def home_axis(self, instance, axis):
+        """Home a single axis via Moonraker."""
+        command = f"G28 {axis}"
+        if moonraker.send_gcode(command):
+            logging.info(f"Axis {axis} homed")
+
+    def home_all_axes(self, instance):
+        """Home all axes via Moonraker."""
+        if moonraker.send_gcode("G28"):
+            logging.info("All axes homed")
+
     def load_positions(self):
         """Load positions from JSON with error handling."""
         if os.path.exists("positions.json"):
@@ -654,6 +710,64 @@ class HomeScreen(Screen):
         super().__init__(**kwargs)
         self.layout = FloatLayout()
         self.add_widget(self.layout)
+
+class GCodeScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
+
+        self.title_label = Label(text="G-Code Befehle", size_hint_y=None, height=40, font_size=20)
+        self.layout.add_widget(self.title_label)
+
+        self.gcode_input = TextInput(
+            hint_text="G-Code eingeben, eine Zeile pro Befehl (z.B. G28)",
+            multiline=True,
+            size_hint=(1, 1),
+            font_size=16
+        )
+        self.layout.add_widget(self.gcode_input)
+
+        button_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=50, spacing=10)
+        send_btn = Button(text="Senden", font_size=16)
+        clear_btn = Button(text="Leeren", font_size=16)
+        send_btn.bind(on_press=self.send_gcode)
+        clear_btn.bind(on_press=self.clear_gcode)
+        button_row.add_widget(send_btn)
+        button_row.add_widget(clear_btn)
+        self.layout.add_widget(button_row)
+
+        self.status_label = Label(text="", size_hint_y=None, height=40, font_size=14)
+        self.layout.add_widget(self.status_label)
+
+        self.add_widget(self.layout)
+
+    def send_gcode(self, instance):
+        raw_text = self.gcode_input.text.strip()
+        if not raw_text:
+            self.status_label.text = "Bitte mindestens einen G-Code Befehl eingeben."
+            return
+
+        commands = []
+        for line in raw_text.splitlines():
+            command = line.strip()
+            if not command or command.startswith(';') or command.startswith('#'):
+                continue
+            commands.append(command)
+
+        if not commands:
+            self.status_label.text = "Keine gültigen Befehle gefunden."
+            return
+
+        success_count = 0
+        for command in commands:
+            if moonraker.send_gcode(command):
+                success_count += 1
+
+        self.status_label.text = f"Gesendet: {success_count}/{len(commands)} Befehle"
+
+    def clear_gcode(self, instance):
+        self.gcode_input.text = ""
+        self.status_label.text = ""
 
 class EinstellungScreen(Screen):
     def __init__(self, **kwargs):
@@ -749,12 +863,28 @@ class MainScreen(BoxLayout):
         prep_box.add_widget(prep_lbl)
         self.sidebar.add_widget(prep_box)
 
+        # G-Code-Screen Button
+        gcode_btn = Button(
+            size_hint=(None, None),
+            size=(64, 64),
+            background_normal=icon('bug.64.png'),
+            background_down=icon('bug.64.png'),
+            pos_hint={'center_x': 0.5},
+            on_press=lambda x: self.switch_screen("gcode")
+        )
+        gcode_lbl = Label(text="G-Code", size_hint_y=None, height=30)
+        gcode_box = BoxLayout(orientation='vertical', size_hint_y=None, height=94)
+        gcode_box.add_widget(gcode_btn)
+        gcode_box.add_widget(gcode_lbl)
+        self.sidebar.add_widget(gcode_box)
+
         # Screens hinzufügen
         self.screen_manager.add_widget(CocktailInputScreen(name="cocktail"))
         self.screen_manager.add_widget(PreparationScreen(name="prep"))
         self.screen_manager.add_widget(MotorPositionScreen(name="motor"))
         self.screen_manager.add_widget(PumpScreen(name="pump"))
         self.screen_manager.add_widget(HomeScreen(name="home"))
+        self.screen_manager.add_widget(GCodeScreen(name="gcode"))
 
         self.screen_manager.current = "home"
         self.sidebar_container.add_widget(self.sidebar)
