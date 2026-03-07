@@ -14,7 +14,7 @@ import requests
 from kivy.config import Config
 Config.set('graphics', 'fullscreen', 'auto')
 # Prevent one physical touch from being processed as additional mouse events.
-Config.set('input', 'mouse', 'mouse,disable_multitouch')
+Config.set('input', 'mouse', 'mouse,disable_on_activity,disable_multitouch')
 
 # Configure logging
 logging.basicConfig(
@@ -702,19 +702,29 @@ class MotorPositionScreen(Screen):
         logging.info(f"Slot {instance.index} ausgewählt")
 
     def save_position(self, instance):
-        if self.selected_circle:
-            try:
-                x = float(self.x_input.text)
-                y = float(self.y_input.text)
-            except ValueError:
-                logging.warning("Ungültige Koordinaten.")
-                return
-            self.positions[str(self.selected_circle.index)] = {
-                "x": x,
-                "y": y
-            }
-            self.store_positions()
-            logging.info(f"Slot {self.selected_circle.index} → X={x}, Y={y}")
+        if not self.selected_circle:
+            logging.warning("Kein Slot ausgewählt.")
+            return
+
+        x_text = self.x_input.text.strip()
+        y_text = self.y_input.text.strip()
+        if not x_text or not y_text:
+            logging.warning("Ungültige Koordinaten.")
+            return
+
+        try:
+            x = float(x_text)
+            y = float(y_text)
+        except ValueError:
+            logging.warning("Ungültige Koordinaten.")
+            return
+
+        self.positions[str(self.selected_circle.index)] = {
+            "x": x,
+            "y": y
+        }
+        self.store_positions()
+        logging.info(f"Slot {self.selected_circle.index} → X={x}, Y={y}")
 
     def send_position(self, instance):
         """Send G-code move command to stored coordinates."""
