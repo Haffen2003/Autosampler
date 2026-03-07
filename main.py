@@ -47,6 +47,7 @@ def load_config():
 
 CONFIG = load_config()
 MOONRAKER_URL = CONFIG.get('moonraker_url', 'http://localhost:7125')
+TOUCH_ROTATION = int(CONFIG.get('touch_rotation', 180))
 
 # base directories for resources
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1012,6 +1013,51 @@ class MainScreen(BoxLayout):
 
     def switch_screen(self, name):
         self.screen_manager.current = name
+
+    def _transform_touch_if_needed(self, touch):
+        """Rotate touch coordinates for physically rotated displays."""
+        if TOUCH_ROTATION % 360 == 0:
+            return False
+
+        device_name = str(getattr(touch, 'device', '')).lower()
+        if 'mouse' in device_name:
+            return False
+
+        width, height = Window.size
+        if TOUCH_ROTATION % 360 == 180:
+            touch.apply_transform_2d(lambda x, y: (width - x, height - y))
+            return True
+        if TOUCH_ROTATION % 360 == 90:
+            touch.apply_transform_2d(lambda x, y: (y, width - x))
+            return True
+        if TOUCH_ROTATION % 360 == 270:
+            touch.apply_transform_2d(lambda x, y: (height - y, x))
+            return True
+        return False
+
+    def on_touch_down(self, touch):
+        touch.push()
+        try:
+            self._transform_touch_if_needed(touch)
+            return super().on_touch_down(touch)
+        finally:
+            touch.pop()
+
+    def on_touch_move(self, touch):
+        touch.push()
+        try:
+            self._transform_touch_if_needed(touch)
+            return super().on_touch_move(touch)
+        finally:
+            touch.pop()
+
+    def on_touch_up(self, touch):
+        touch.push()
+        try:
+            self._transform_touch_if_needed(touch)
+            return super().on_touch_up(touch)
+        finally:
+            touch.pop()
 
 class CocktailApp(App):
     def build(self):
