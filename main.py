@@ -53,6 +53,30 @@ TOUCH_ROTATION = int(CONFIG.get('touch_rotation', 180))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(BASE_DIR, CONFIG.get('icon_dir', 'Icons'))
 BACKGROUND_DIR = os.path.join(BASE_DIR, 'Background')
+COCKTAILS_DIR = os.path.join(BASE_DIR, 'Cocktails')
+COCKTAILS_ICON_DIR = os.path.join(COCKTAILS_DIR, '64_96')
+
+
+def pretty_cocktail_name(filename):
+    """Convert icon filename to a readable cocktail label."""
+    base_name = os.path.splitext(filename)[0]
+    return base_name.replace('_', ' ')
+
+
+def preferred_ui_font():
+    """Pick a bold display font path with cross-platform fallbacks."""
+    candidates = [
+        os.path.join(BASE_DIR, 'Fonts', 'BebasNeue-Regular.ttf'),
+        os.path.join(BASE_DIR, 'Fonts', 'Orbitron-Bold.ttf'),
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf',
+        'C:\\Windows\\Fonts\\bahnschrift.ttf',
+        'C:\\Windows\\Fonts\\segoeuib.ttf',
+    ]
+    for font_path in candidates:
+        if os.path.exists(font_path):
+            return font_path
+    return None
 
 def icon(name):
     """Return full path to an icon file located in the Icons folder with validation."""
@@ -783,8 +807,105 @@ class PumpScreen(Screen):
 class HomeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.layout = FloatLayout()
-        self.add_widget(self.layout)
+        self.ui_font = preferred_ui_font()
+
+        root = BoxLayout(orientation='vertical', padding=[16, 12, 16, 12], spacing=10)
+
+        title = Label(
+            text="Cocktail Auswahl",
+            size_hint_y=None,
+            height=56,
+            font_size=34,
+            color=[1, 1, 1, 1],
+            bold=True
+        )
+        if self.ui_font:
+            title.font_name = self.ui_font
+        root.add_widget(title)
+
+        subtitle = Label(
+            text="Tippe auf ein Rezept im Cocktail-Tab, hier siehst du alle verfügbaren Drinks.",
+            size_hint_y=None,
+            height=28,
+            font_size=16,
+            color=[0.82, 0.9, 1, 1]
+        )
+        if self.ui_font:
+            subtitle.font_name = self.ui_font
+        root.add_widget(subtitle)
+
+        self.grid = GridLayout(
+            cols=5,
+            spacing=[14, 14],
+            padding=[8, 6, 8, 6],
+            size_hint_y=None
+        )
+        self.grid.bind(minimum_height=self.grid.setter('height'))
+
+        scroll = ScrollView(size_hint=(1, 1))
+        scroll.add_widget(self.grid)
+        root.add_widget(scroll)
+
+        self.status_label = Label(text="", size_hint_y=None, height=26, font_size=14, color=[1, 1, 1, 0.9])
+        root.add_widget(self.status_label)
+
+        self.add_widget(root)
+        self.populate_cocktail_icons()
+
+    def on_pre_enter(self, *args):
+        self.populate_cocktail_icons()
+        return super().on_pre_enter(*args)
+
+    def populate_cocktail_icons(self):
+        self.grid.clear_widgets()
+
+        if not os.path.isdir(COCKTAILS_ICON_DIR):
+            self.status_label.text = f"Kein Ordner gefunden: {COCKTAILS_ICON_DIR}"
+            return
+
+        icon_files = sorted(
+            [f for f in os.listdir(COCKTAILS_ICON_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        )
+
+        if not icon_files:
+            self.status_label.text = "Keine Cocktail-Icons in Cocktails/64_96 gefunden."
+            return
+
+        for icon_file in icon_files:
+            card = BoxLayout(
+                orientation='vertical',
+                size_hint=(None, None),
+                size=(150, 142),
+                spacing=6,
+                padding=[4, 4, 4, 4]
+            )
+
+            icon_path = os.path.join(COCKTAILS_ICON_DIR, icon_file)
+            drink_image = Image(
+                source=icon_path,
+                size_hint=(None, None),
+                size=(96, 96),
+                pos_hint={'center_x': 0.5}
+            )
+
+            name_label = Label(
+                text=pretty_cocktail_name(icon_file),
+                size_hint_y=None,
+                height=32,
+                font_size=16,
+                color=[1, 1, 1, 1],
+                halign='center',
+                valign='middle'
+            )
+            name_label.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
+            if self.ui_font:
+                name_label.font_name = self.ui_font
+
+            card.add_widget(drink_image)
+            card.add_widget(name_label)
+            self.grid.add_widget(card)
+
+        self.status_label.text = f"{len(icon_files)} Cocktails geladen"
 
 class GCodeScreen(Screen):
     def __init__(self, **kwargs):
