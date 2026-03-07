@@ -151,8 +151,8 @@ from kivy.clock import Clock
 
 
 class Button(KivyButton):
-    """Button with larger invisible touch hitbox for touch displays."""
-    touch_padding = NumericProperty(12)
+    """Custom button with optional touch padding (0 by default to avoid overlap)."""
+    touch_padding = NumericProperty(0)
 
     def collide_point(self, x, y):
         padding = float(self.touch_padding)
@@ -596,7 +596,7 @@ class MotorPositionScreen(Screen):
         self.draw_circles()
         top_area.add_widget(self.slot_area)
 
-        home_column = BoxLayout(orientation='vertical', size_hint=(None, 1), width=72, spacing=6)
+        home_column = BoxLayout(orientation='vertical', size_hint=(None, 1), width=142, spacing=6)
 
         home_x_btn = Button(text="X", size_hint=(None, None), size=(64, 64), font_size=18)
         home_y_btn = Button(text="Y", size_hint=(None, None), size=(64, 64), font_size=18)
@@ -617,10 +617,25 @@ class MotorPositionScreen(Screen):
         home_z_btn.bind(on_press=partial(self.home_axis, axis='Z'))
         home_all_btn.bind(on_press=self.home_all_axes)
 
+        motor_off_btn = Button(text="", size_hint=(None, None), size=(64, 64))
+        motor_off_icon = Image(source=icon('aus.40.png'), size_hint=(None, None), size=(40, 40))
+
+        def update_motor_off_icon(*_args):
+            motor_off_icon.center = motor_off_btn.center
+
+        motor_off_btn.bind(pos=update_motor_off_icon, size=update_motor_off_icon)
+        motor_off_btn.add_widget(motor_off_icon)
+        update_motor_off_icon()
+        motor_off_btn.bind(on_press=self.disable_motors)
+
         home_column.add_widget(home_x_btn)
         home_column.add_widget(home_y_btn)
         home_column.add_widget(home_z_btn)
-        home_column.add_widget(home_all_btn)
+
+        bottom_home_row = BoxLayout(orientation='horizontal', size_hint=(None, None), size=(134, 64), spacing=6)
+        bottom_home_row.add_widget(home_all_btn)
+        bottom_home_row.add_widget(motor_off_btn)
+        home_column.add_widget(bottom_home_row)
 
         top_area.add_widget(home_column)
         self.layout.add_widget(top_area)
@@ -714,6 +729,11 @@ class MotorPositionScreen(Screen):
         """Home all axes via Moonraker."""
         if moonraker.send_gcode("G28"):
             logging.info("All axes homed")
+
+    def disable_motors(self, instance):
+        """Disable stepper motors (holding current off)."""
+        if moonraker.send_gcode("M18"):
+            logging.info("Motors disabled (holding current off)")
 
     def load_positions(self):
         """Load positions from JSON with error handling."""
