@@ -147,6 +147,7 @@ from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.image import Image
 from kivy.properties import NumericProperty
+from kivy.clock import Clock
 
 
 class Button(KivyButton):
@@ -294,6 +295,42 @@ class MoonrakerClient:
         except Exception as e:
             logging.error(f'Error sending G-code: {e}')
             return False
+
+    def get_console_lines(self, count: int = 50):
+        """Fetch recent console lines from Moonraker gcode store."""
+        url = f"{self.base_url}/server/gcode_store"
+        try:
+            resp = requests.get(url, params={"count": max(1, int(count))}, timeout=self.timeout)
+            if resp.status_code != 200:
+                logging.error(f'G-code store error {resp.status_code}: {resp.text}')
+                return []
+
+            payload = resp.json() if resp.content else {}
+            result = payload.get("result", {}) if isinstance(payload, dict) else {}
+            gcode_store = result.get("gcode_store", []) if isinstance(result, dict) else []
+            if not isinstance(gcode_store, list):
+                return []
+
+            parsed_lines = []
+            for item in gcode_store:
+                if not isinstance(item, dict):
+                    continue
+                msg_type = str(item.get("type", "info")).upper()
+                message = str(item.get("message", "")).strip()
+                if not message:
+                    continue
+                parsed_lines.append(f"[{msg_type}] {message}")
+
+            return parsed_lines
+        except requests.exceptions.Timeout:
+            logging.error(f'Timeout fetching gcode store from {url}')
+            return []
+        except requests.exceptions.ConnectionError:
+            logging.error(f'Cannot connect to Moonraker at {self.base_url}')
+            return []
+        except Exception as e:
+            logging.error(f'Error fetching gcode store: {e}')
+            return []
 
 # singleton instance
 moonraker = MoonrakerClient()
@@ -722,7 +759,7 @@ class GCodeScreen(Screen):
         self.gcode_input = TextInput(
             hint_text="G-Code eingeben, eine Zeile pro Befehl (z.B. G28)",
             multiline=True,
-            size_hint=(1, 1),
+            size_hint=(1, 0.45),
             font_size=16
         )
         self.layout.add_widget(self.gcode_input)
@@ -730,16 +767,57 @@ class GCodeScreen(Screen):
         button_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=50, spacing=10)
         send_btn = Button(text="Senden", font_size=16)
         clear_btn = Button(text="Leeren", font_size=16)
+        refresh_console_btn = Button(text="Console aktualisieren", font_size=16)
         send_btn.bind(on_press=self.send_gcode)
         clear_btn.bind(on_press=self.clear_gcode)
+        refresh_console_btn.bind(on_press=lambda _btn: self.refresh_console())
         button_row.add_widget(send_btn)
         button_row.add_widget(clear_btn)
+        button_row.add_widget(refresh_console_btn)
         self.layout.add_widget(button_row)
+
+        self.console_output = TextInput(
+            text="",
+            readonly=True,
+            multiline=True,
+            size_hint=(1, 0.45),
+            font_size=14,
+            hint_text="Live-Konsole: Moonraker-Antworten erscheinen hier"
+        )
+        self.layout.add_widget(self.console_output)
 
         self.status_label = Label(text="", size_hint_y=None, height=40, font_size=14)
         self.layout.add_widget(self.status_label)
 
+        self._console_event = None
+        self._last_console_lines = []
+
         self.add_widget(self.layout)
+
+    def on_pre_enter(self, *args):
+        self.refresh_console()
+        if self._console_event is None:
+            self._console_event = Clock.schedule_interval(lambda _dt: self.refresh_console(), 1.0)
+        return super().on_pre_enter(*args)
+
+    def on_leave(self, *args):
+        if self._console_event is not None:
+            self._console_event.cancel()
+            self._console_event = None
+        return super().on_leave(*args)
+
+    def refresh_console(self):
+        lines = moonraker.get_console_lines(count=60)
+        if not lines:
+            return
+
+        # Prevent unnecessary redraws if content did not change.
+        if lines == self._last_console_lines:
+            return
+
+        self._last_console_lines = lines
+        self.console_output.text = "\n".join(lines)
+        self.console_output.cursor = (0, len(self.console_output._lines))
 
     def send_gcode(self, instance):
         raw_text = self.gcode_input.text.strip()
@@ -762,8 +840,11 @@ class GCodeScreen(Screen):
         for command in commands:
             if moonraker.send_gcode(command):
                 success_count += 1
+                self.console_output.text += f"\n[SEND] {command}" if self.console_output.text else f"[SEND] {command}"
 
         self.status_label.text = f"Gesendet: {success_count}/{len(commands)} Befehle"
+        # Trigger one immediate refresh so responses such as QUERY_ENDSTOPS show up quickly.
+        Clock.schedule_once(lambda _dt: self.refresh_console(), 0.3)
 
     def clear_gcode(self, instance):
         self.gcode_input.text = ""
