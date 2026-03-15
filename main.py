@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import time
 import traceback
 from functools import partial
 
@@ -42,12 +43,14 @@ def load_config():
     
     return {
         'moonraker_url': 'http://localhost:7125',
-        'icon_dir': 'Icons'
+        'icon_dir': 'Icons',
+        'enable_cocktail_screen': False
     }
 
 CONFIG = load_config()
 MOONRAKER_URL = CONFIG.get('moonraker_url', 'http://localhost:7125')
 TOUCH_ROTATION = int(CONFIG.get('touch_rotation', 180))
+ENABLE_COCKTAIL_SCREEN = bool(CONFIG.get('enable_cocktail_screen', False))
 
 # base directories for resources
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -409,6 +412,35 @@ class MoonrakerClient:
         except Exception as e:
             logging.error(f'Error fetching temperatures: {e}')
             return {}
+
+    def get_current_z_position(self):
+        """Fetch current toolhead Z position from Moonraker."""
+        url = f"{self.base_url}/printer/objects/query"
+        params = {"toolhead": "position"}
+        try:
+            resp = requests.get(url, params=params, timeout=self.timeout)
+            if resp.status_code != 200:
+                logging.error(f'Toolhead query error {resp.status_code}: {resp.text}')
+                return None
+
+            payload = resp.json() if resp.content else {}
+            result = payload.get("result", {}) if isinstance(payload, dict) else {}
+            status = result.get("status", {}) if isinstance(result, dict) else {}
+            toolhead = status.get("toolhead", {}) if isinstance(status, dict) else {}
+            position = toolhead.get("position") if isinstance(toolhead, dict) else None
+
+            if isinstance(position, (list, tuple)) and len(position) >= 3:
+                return float(position[2])
+            return None
+        except requests.exceptions.Timeout:
+            logging.error(f'Timeout fetching toolhead position from {url}')
+            return None
+        except requests.exceptions.ConnectionError:
+            logging.error(f'Cannot connect to Moonraker at {self.base_url}')
+            return None
+        except Exception as e:
+            logging.error(f'Error fetching toolhead position: {e}')
+            return None
 
 # singleton instance
 moonraker = MoonrakerClient()
@@ -802,8 +834,28 @@ class MotorPositionScreen(Screen):
         if self.selected_circle:
             pos = self.positions.get(str(self.selected_circle.index))
             if pos:
-                command = f"G1 X{pos['x']} Y{pos['y']}"
-                moonraker.send_gcode(command)
+                target_x = pos['x']
+                target_y = pos['y']
+
+                if not moonraker.send_gcode("G90"):
+                    logging.error("Failed to set absolute positioning (G90)")
+                    return
+
+                current_z = moonraker.get_current_z_position()
+                if current_z is None:
+                    logging.warning("Z position unknown, moving to Z0 as safety step before XY move")
+                    if not moonraker.send_gcode("G1 Z0"):
+                        logging.error("Failed safety move to Z0")
+                        return
+                elif abs(current_z) > 0.001:
+                    logging.info(f"Z={current_z:.3f} detected, moving to Z0 before XY move")
+                    if not moonraker.send_gcode("G1 Z0"):
+                        logging.error("Failed safety move to Z0")
+                        return
+
+                command = f"G1 X{target_x} Y{target_y}"
+                if moonraker.send_gcode(command):
+                    logging.info(f"Moved to X={target_x}, Y={target_y} with Z safety check")
             else:
                 logging.warning(f"No position saved for slot {self.selected_circle.index}")
 
@@ -852,15 +904,27 @@ class PumpScreen(Screen):
 class FanCurveGraph(Widget):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.temp_points = [20, 30, 40, 50, 60, 70, 80, 90]
-        self.pwm_points = [0, 15, 28, 42, 58, 74, 88, 100]
-        self.current_temperature = 25.0
+        self.window_seconds = 500.0
+        self.start_monotonic = time.monotonic()
+        self.history = []
         self.bind(pos=self.redraw, size=self.redraw)
         Clock.schedule_once(lambda _dt: self.redraw(), 0)
 
-    def set_temperature(self, temperature):
-        self.current_temperature = float(temperature)
+    def add_pwm_sample(self, pwm_percent):
+        elapsed = time.monotonic() - self.start_monotonic
+        pwm_value = max(0.0, min(float(pwm_percent), 100.0))
+        self.history.append((elapsed, pwm_value))
+
+        window_start, _window_end = self.get_window_range_seconds(now_elapsed=elapsed)
+        self.history = [(t, p) for t, p in self.history if t >= window_start]
         self.redraw()
+
+    def get_window_range_seconds(self, now_elapsed=None):
+        if now_elapsed is None:
+            now_elapsed = time.monotonic() - self.start_monotonic
+        window_end = max(self.window_seconds, float(now_elapsed))
+        window_start = max(0.0, window_end - self.window_seconds)
+        return window_start, window_end
 
     def _graph_bounds(self):
         pad_x = dp(22)
@@ -871,40 +935,25 @@ class FanCurveGraph(Widget):
         top = self.top - pad_y
         return left, right, bottom, top
 
-    def _temp_to_x(self, temperature):
+    def _time_to_x(self, elapsed_seconds, window_start, window_end):
         left, right, _, _ = self._graph_bounds()
-        t_min = float(self.temp_points[0])
-        t_max = float(self.temp_points[-1])
-        temp = max(t_min, min(float(temperature), t_max))
-        return left + (temp - t_min) / (t_max - t_min) * (right - left)
+        t = max(window_start, min(float(elapsed_seconds), window_end))
+        if window_end <= window_start:
+            return left
+        return left + (t - window_start) / (window_end - window_start) * (right - left)
 
     def _pwm_to_y(self, pwm_percent):
         _, _, bottom, top = self._graph_bounds()
         pwm = max(0.0, min(float(pwm_percent), 100.0))
         return bottom + pwm / 100.0 * (top - bottom)
 
-    def curve_pwm_for_temp(self, temperature):
-        temp = float(temperature)
-        if temp <= self.temp_points[0]:
-            return float(self.pwm_points[0])
-        if temp >= self.temp_points[-1]:
-            return float(self.pwm_points[-1])
-
-        for index in range(len(self.temp_points) - 1):
-            t1 = float(self.temp_points[index])
-            t2 = float(self.temp_points[index + 1])
-            if t1 <= temp <= t2:
-                p1 = float(self.pwm_points[index])
-                p2 = float(self.pwm_points[index + 1])
-                ratio = (temp - t1) / (t2 - t1)
-                return p1 + ratio * (p2 - p1)
-        return 0.0
-
     def redraw(self, *_args):
         if self.width <= 0 or self.height <= 0:
             return
 
         left, right, bottom, top = self._graph_bounds()
+        now_elapsed = time.monotonic() - self.start_monotonic
+        window_start, window_end = self.get_window_range_seconds(now_elapsed=now_elapsed)
         self.canvas.clear()
 
         with self.canvas:
@@ -916,23 +965,22 @@ class FanCurveGraph(Widget):
                 y_pos = self._pwm_to_y(grid_step)
                 Line(points=[left, y_pos, right, y_pos], width=1)
 
-            for marker in [20, 40, 60, 80, 90]:
-                x_pos = self._temp_to_x(marker)
+            for marker in range(0, 501, 100):
+                t_marker = window_start + marker
+                x_pos = self._time_to_x(t_marker, window_start, window_end)
                 Line(points=[x_pos, bottom, x_pos, top], width=1)
 
             Color(0.5, 0.66, 0.82, 1)
-            curve_points = []
-            for temp, pwm in zip(self.temp_points, self.pwm_points):
-                curve_points.extend([self._temp_to_x(temp), self._pwm_to_y(pwm)])
-            Line(points=curve_points, width=2)
+            visible_points = []
+            for elapsed, pwm in self.history:
+                if window_start <= elapsed <= window_end:
+                    visible_points.extend([self._time_to_x(elapsed, window_start, window_end), self._pwm_to_y(pwm)])
 
-            current_x = self._temp_to_x(self.current_temperature)
-            current_curve_pwm = self.curve_pwm_for_temp(self.current_temperature)
-            current_y = self._pwm_to_y(current_curve_pwm)
-
-            Color(1, 0.2, 0.2, 1)
-            Line(points=[current_x, bottom, current_x, top], width=1.4)
-            Ellipse(pos=(current_x - dp(4), current_y - dp(4)), size=(dp(8), dp(8)))
+            if len(visible_points) >= 4:
+                Line(points=visible_points, width=2)
+            elif len(visible_points) == 2:
+                px, py = visible_points
+                Ellipse(pos=(px - dp(3), py - dp(3)), size=(dp(6), dp(6)))
 
             Color(0.65, 0.75, 0.85, 1)
             Line(points=[left, bottom, left, top], width=1.4)
@@ -949,19 +997,33 @@ class LuefterScreen(Screen):
         title = Label(text="Lüftersteuerung", size_hint_y=None, height=44, font_size=24, color=[1, 1, 1, 1])
         root.add_widget(title)
 
-        self.fan_graph = FanCurveGraph(size_hint=(1, 0.56))
-        root.add_widget(self.fan_graph)
+        axis_info = Label(text="X: Zeit (s)   |   Y: PWM Power (%)", size_hint_y=None, height=24, font_size=14, color=[0.78, 0.9, 1, 1])
+        root.add_widget(axis_info)
 
-        self.temp_label = Label(text="Temperatur: --.- °C", size_hint_y=None, height=30, font_size=18, color=[1, 0.45, 0.45, 1])
-        root.add_widget(self.temp_label)
+        graph_row = BoxLayout(orientation='horizontal', size_hint=(1, 0.56), spacing=8)
+        y_axis_labels = BoxLayout(orientation='vertical', size_hint=(None, 1), width=44)
+        y_axis_labels.add_widget(Label(text="100", font_size=13, color=[0.75, 0.88, 1, 1]))
+        y_axis_labels.add_widget(Label(text="50", font_size=13, color=[0.75, 0.88, 1, 1]))
+        y_axis_labels.add_widget(Label(text="0", font_size=13, color=[0.75, 0.88, 1, 1]))
+        graph_row.add_widget(y_axis_labels)
 
-        self.curve_label = Label(text="Kurve @ Temp: -- % PWM", size_hint_y=None, height=24, font_size=15, color=[0.75, 0.88, 1, 1])
-        root.add_widget(self.curve_label)
+        self.fan_graph = FanCurveGraph(size_hint=(1, 1))
+        graph_row.add_widget(self.fan_graph)
+        root.add_widget(graph_row)
+
+        x_axis_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=24, padding=[52, 0, 0, 0])
+        self.x_axis_start_label = Label(text="0 s", halign='left', valign='middle', font_size=13, color=[0.75, 0.88, 1, 1])
+        self.x_axis_start_label.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
+        self.x_axis_end_label = Label(text="500 s", halign='right', valign='middle', font_size=13, color=[0.75, 0.88, 1, 1])
+        self.x_axis_end_label.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
+        x_axis_row.add_widget(self.x_axis_start_label)
+        x_axis_row.add_widget(self.x_axis_end_label)
+        root.add_widget(x_axis_row)
 
         pwm_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=44, spacing=8)
         pwm_row.add_widget(Label(text="PWM", size_hint=(None, 1), width=54, font_size=16))
 
-        self.pwm_slider = Slider(min=0, max=100, value=35, step=1)
+        self.pwm_slider = Slider(min=0, max=100, value=65, step=1)
         self.pwm_slider.bind(value=self.on_pwm_slider_change)
         pwm_row.add_widget(self.pwm_slider)
 
@@ -988,11 +1050,12 @@ class LuefterScreen(Screen):
 
         self.add_widget(root)
         self.on_pwm_slider_change(self.pwm_slider, self.pwm_slider.value)
+        self.update_pwm_graph()
 
     def on_pre_enter(self, *args):
-        self.refresh_temperature()
+        self.update_pwm_graph()
         if self._refresh_event is None:
-            self._refresh_event = Clock.schedule_interval(lambda _dt: self.refresh_temperature(), 1.5)
+            self._refresh_event = Clock.schedule_interval(lambda _dt: self.update_pwm_graph(), 1.5)
         return super().on_pre_enter(*args)
 
     def on_leave(self, *args):
@@ -1001,29 +1064,34 @@ class LuefterScreen(Screen):
             self._refresh_event = None
         return super().on_leave(*args)
 
+    def _slider_to_pwm_percent(self, slider_value):
+        return max(0, min(100, int(round(100 - slider_value))))
+
     def on_pwm_slider_change(self, _slider, value):
-        self.pwm_value_label.text = f"{int(round(value))} %"
+        pwm_percent = self._slider_to_pwm_percent(value)
+        self.pwm_value_label.text = f"{pwm_percent} %"
 
     def _pwm_percent_to_gcode_value(self, percent):
         percent_value = max(0, min(int(round(percent)), 100))
         return int(round((percent_value / 100.0) * 255.0))
 
     def fan_on(self, _instance):
-        pwm_percent = int(round(self.pwm_slider.value))
+        pwm_percent = self._slider_to_pwm_percent(self.pwm_slider.value)
         if pwm_percent == 0:
             pwm_percent = 35
-            self.pwm_slider.value = pwm_percent
+            self.pwm_slider.value = 100 - pwm_percent
         self._send_pwm(pwm_percent)
 
     def fan_off(self, _instance):
         if moonraker.send_gcode("M107"):
             self.status_label.text = "Lüfter ausgeschaltet"
             logging.info("Fan disabled via M107")
+            self.fan_graph.add_pwm_sample(0)
         else:
             self.status_label.text = "Fehler: Lüfter konnte nicht ausgeschaltet werden"
 
     def apply_pwm(self, _instance):
-        pwm_percent = int(round(self.pwm_slider.value))
+        pwm_percent = self._slider_to_pwm_percent(self.pwm_slider.value)
         self._send_pwm(pwm_percent)
 
     def _send_pwm(self, pwm_percent):
@@ -1032,21 +1100,16 @@ class LuefterScreen(Screen):
         if moonraker.send_gcode(command):
             self.status_label.text = f"PWM gesetzt: {pwm_percent} %"
             logging.info(f"Fan PWM set to {pwm_percent}% (S{gcode_value})")
+            self.fan_graph.add_pwm_sample(pwm_percent)
         else:
             self.status_label.text = "Fehler: PWM konnte nicht gesetzt werden"
 
-    def refresh_temperature(self):
-        temperatures = moonraker.get_printer_temperatures()
-        current_temp = temperatures.get("extruder")
-        if current_temp is None:
-            self.temp_label.text = "Temperatur: --.- °C"
-            self.curve_label.text = "Kurve @ Temp: -- % PWM"
-            return
-
-        self.fan_graph.set_temperature(current_temp)
-        curve_pwm = int(round(self.fan_graph.curve_pwm_for_temp(current_temp)))
-        self.temp_label.text = f"Temperatur: {current_temp:.1f} °C"
-        self.curve_label.text = f"Kurve @ Temp: {curve_pwm} % PWM"
+    def update_pwm_graph(self):
+        pwm_percent = self._slider_to_pwm_percent(self.pwm_slider.value)
+        self.fan_graph.add_pwm_sample(pwm_percent)
+        start_sec, end_sec = self.fan_graph.get_window_range_seconds()
+        self.x_axis_start_label.text = f"{int(start_sec)} s"
+        self.x_axis_end_label.text = f"{int(end_sec)} s"
 
 
 
@@ -1350,20 +1413,21 @@ class MainScreen(BoxLayout):
         pump_box.add_widget(pump_lbl)
         self.sidebar.add_widget(pump_box)
 
-        # Cocktail-Screen Button
-        cocktail_btn = Button(
-            size_hint=(None, None),
-            size=(64, 64),
-            background_normal=icon('cocktail.64.png'),
-            background_down=icon('cocktail.64.png'),
-            pos_hint={'center_x': 0.5},
-            on_press=lambda x: self.switch_screen("cocktail")
-        )
-        cocktail_lbl = Label(text="Cocktails", size_hint_y=None, height=30)
-        cocktail_box = BoxLayout(orientation='vertical', size_hint_y=None, height=94)
-        cocktail_box.add_widget(cocktail_btn)
-        cocktail_box.add_widget(cocktail_lbl)
-        self.sidebar.add_widget(cocktail_box)
+        if ENABLE_COCKTAIL_SCREEN:
+            # Cocktail-Screen Button
+            cocktail_btn = Button(
+                size_hint=(None, None),
+                size=(64, 64),
+                background_normal=icon('cocktail.64.png'),
+                background_down=icon('cocktail.64.png'),
+                pos_hint={'center_x': 0.5},
+                on_press=lambda x: self.switch_screen("cocktail")
+            )
+            cocktail_lbl = Label(text="Cocktails", size_hint_y=None, height=30)
+            cocktail_box = BoxLayout(orientation='vertical', size_hint_y=None, height=94)
+            cocktail_box.add_widget(cocktail_btn)
+            cocktail_box.add_widget(cocktail_lbl)
+            self.sidebar.add_widget(cocktail_box)
 
         # Zubereitung-Screen Button
         prep_btn = Button(
@@ -1396,7 +1460,8 @@ class MainScreen(BoxLayout):
         self.sidebar.add_widget(gcode_box)
 
         # Screens hinzufügen
-        self.screen_manager.add_widget(CocktailInputScreen(name="cocktail"))
+        if ENABLE_COCKTAIL_SCREEN:
+            self.screen_manager.add_widget(CocktailInputScreen(name="cocktail"))
         self.screen_manager.add_widget(PreparationScreen(name="prep"))
         self.screen_manager.add_widget(MotorPositionScreen(name="motor"))
         self.screen_manager.add_widget(LuefterScreen(name="luefter"))
