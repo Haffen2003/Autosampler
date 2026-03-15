@@ -49,8 +49,7 @@ def load_config():
 
 CONFIG = load_config()
 MOONRAKER_URL = CONFIG.get('moonraker_url', 'http://localhost:7125')
-TOUCH_ROTATION = int(CONFIG.get('touch_rotation', 0))
-TOUCH_ROTATION_ENABLED = bool(CONFIG.get('touch_rotation_enabled', False))
+TOUCH_ROTATION = int(CONFIG.get('touch_rotation', 180))
 ENABLE_COCKTAIL_SCREEN = bool(CONFIG.get('enable_cocktail_screen', False))
 
 # base directories for resources
@@ -1577,9 +1576,6 @@ class MainScreen(BoxLayout):
 
     def _transform_touch_if_needed(self, touch):
         """Rotate touch coordinates for physically rotated displays."""
-        if not TOUCH_ROTATION_ENABLED:
-            return False
-
         if TOUCH_ROTATION % 360 == 0:
             return False
 
