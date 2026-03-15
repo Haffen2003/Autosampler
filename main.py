@@ -767,6 +767,12 @@ class MotorPositionScreen(Screen):
         self.y_input = TextInput(hint_text="Y", multiline=False, size_hint=(1, 1), font_size=12)
         y_row.add_widget(self.y_input)
         input_box.add_widget(y_row)
+
+        speed_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=35, spacing=3)
+        speed_row.add_widget(Label(text="V:", size_hint=(None, 1), width=30, font_size=14))
+        self.speed_input = TextInput(hint_text="Geschwindigkeit (mm/min)", multiline=False, size_hint=(1, 1), font_size=12)
+        speed_row.add_widget(self.speed_input)
+        input_box.add_widget(speed_row)
         
         input_area.add_widget(input_box)
 
@@ -784,7 +790,31 @@ class MotorPositionScreen(Screen):
         input_area.add_widget(button_box)
         self.layout.add_widget(input_area)
 
+        self.status_label = Label(
+            text="Bereit",
+            size_hint=(1, None),
+            height=34,
+            color=[1, 1, 1, 1],
+            halign='left',
+            valign='middle',
+            font_size=13,
+            padding=(8, 0)
+        )
+        self.status_label.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
+        self.layout.add_widget(self.status_label)
+
         self.add_widget(self.layout)
+
+    def set_status(self, message, level='info'):
+        """Update status text in the motor UI."""
+        colors = {
+            'info': [1, 1, 1, 1],
+            'success': [0.4, 1, 0.4, 1],
+            'warn': [1, 0.85, 0.3, 1],
+            'error': [1, 0.4, 0.4, 1]
+        }
+        self.status_label.text = message
+        self.status_label.color = colors.get(level, colors['info'])
 
     def draw_circles(self):
         self.slot_area.clear_widgets()
@@ -799,35 +829,45 @@ class MotorPositionScreen(Screen):
         instance.set_selected(True)
         self.selected_circle = instance
 
-        pos = self.positions.get(str(instance.index), {"x": "", "y": ""})
-        self.x_input.text = str(pos["x"])
-        self.y_input.text = str(pos["y"])
+        pos = self.positions.get(str(instance.index), {"x": "", "y": "", "speed": 2000})
+        self.x_input.text = str(pos.get("x", ""))
+        self.y_input.text = str(pos.get("y", ""))
+        self.speed_input.text = str(pos.get("speed", 2000))
         logging.info(f"Slot {instance.index} ausgewählt")
 
     def save_position(self, instance):
         if not self.selected_circle:
             logging.warning("Kein Slot ausgewählt.")
+            self.set_status("Kein Slot ausgewählt.", "warn")
             return
 
         x_text = self.x_input.text.strip()
         y_text = self.y_input.text.strip()
-        if not x_text or not y_text:
+        speed_text = self.speed_input.text.strip()
+        if not x_text or not y_text or not speed_text:
             logging.warning("Ungültige Koordinaten.")
+            self.set_status("Bitte X, Y und Geschwindigkeit eingeben.", "warn")
             return
 
         try:
             x = float(x_text)
             y = float(y_text)
+            speed = float(speed_text)
+            if speed <= 0:
+                raise ValueError
         except ValueError:
-            logging.warning("Ungültige Koordinaten.")
+            logging.warning("Ungültige Koordinaten oder Geschwindigkeit.")
+            self.set_status("Ungültige Werte: X/Y oder Geschwindigkeit.", "warn")
             return
 
         self.positions[str(self.selected_circle.index)] = {
             "x": x,
-            "y": y
+            "y": y,
+            "speed": speed
         }
         self.store_positions()
-        logging.info(f"Slot {self.selected_circle.index} → X={x}, Y={y}")
+        logging.info(f"Slot {self.selected_circle.index} → X={x}, Y={y}, V={speed}")
+        self.set_status(f"Slot {self.selected_circle.index}: Position + V gespeichert", "success")
 
     def send_position(self, instance):
         """Send G-code move command to stored coordinates."""
@@ -836,44 +876,100 @@ class MotorPositionScreen(Screen):
             if pos:
                 target_x = pos['x']
                 target_y = pos['y']
+                target_speed = pos.get('speed')
 
-                if not moonraker.send_gcode("G90"):
-                    logging.error("Failed to set absolute positioning (G90)")
+                if target_speed is None:
+                    logging.warning(f"No speed saved for slot {self.selected_circle.index}")
+                    self.set_status("Keine Geschwindigkeit gespeichert", "warn")
                     return
 
-                current_z = moonraker.get_current_z_position()
-                if current_z is None:
-                    logging.warning("Z position unknown, moving to Z0 as safety step before XY move")
-                    if not moonraker.send_gcode("G1 Z0"):
-                        logging.error("Failed safety move to Z0")
-                        return
-                elif abs(current_z) > 0.001:
-                    logging.info(f"Z={current_z:.3f} detected, moving to Z0 before XY move")
-                    if not moonraker.send_gcode("G1 Z0"):
-                        logging.error("Failed safety move to Z0")
-                        return
+                try:
+                    target_speed = float(target_speed)
+                    if target_speed <= 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    logging.warning(f"Invalid speed for slot {self.selected_circle.index}: {target_speed}")
+                    self.set_status("Ungültige Geschwindigkeit im Slot", "warn")
+                    return
 
-                command = f"G1 X{target_x} Y{target_y}"
+                if not self.ensure_z_homed_and_zero():
+                    logging.error("Blocked XY move because Z safety sequence failed")
+                    self.set_status("XY gesperrt: zuerst Z homing + Z0 erforderlich", "error")
+                    return
+
+                command = f"G1 X{target_x} Y{target_y} F{target_speed}"
                 if moonraker.send_gcode(command):
-                    logging.info(f"Moved to X={target_x}, Y={target_y} with Z safety check")
+                    logging.info(f"Moved to X={target_x}, Y={target_y} at V={target_speed} after Z home + Z0 safety sequence")
+                    self.set_status(f"Bewegt auf X={target_x}, Y={target_y} mit V={target_speed}", "success")
+                else:
+                    self.set_status("XY-Fahrt fehlgeschlagen", "error")
             else:
                 logging.warning(f"No position saved for slot {self.selected_circle.index}")
+                self.set_status("Kein Wert für gewählten Slot gespeichert", "warn")
+
+    def ensure_z_homed_and_zero(self):
+        """Mandatory safety sequence before XY motion: home Z, then move to Z0."""
+        self.set_status("Sicherheitssequenz: Z wird gehomed...", "warn")
+        if not moonraker.send_gcode("G90"):
+            logging.error("Failed to set absolute positioning (G90)")
+            self.set_status("Fehler: G90 konnte nicht gesetzt werden", "error")
+            return False
+        if not moonraker.send_gcode("G28 Z"):
+            logging.error("Failed to home Z axis")
+            self.set_status("Fehler: Z konnte nicht gehomed werden", "error")
+            return False
+        self.set_status("Sicherheitssequenz: Z auf 0 fahren...", "warn")
+        if not moonraker.send_gcode("G1 Z0"):
+            logging.error("Failed to move Z to 0 after Z homing")
+            self.set_status("Fehler: Z konnte nicht auf 0 fahren", "error")
+            return False
+        logging.info("Z safety sequence complete: Z homed and moved to Z0")
+        self.set_status("Z-Sicherheitssequenz abgeschlossen (Z homed + Z0)", "success")
+        return True
 
     def home_axis(self, instance, axis):
         """Home a single axis via Moonraker."""
+        axis = str(axis).upper()
+
+        if axis == "Z":
+            if self.ensure_z_homed_and_zero():
+                logging.info("Axis Z homed and moved to Z0")
+                self.set_status("Z gehomed und auf 0 gefahren", "success")
+            return
+
+        if axis in ("X", "Y"):
+            if not self.ensure_z_homed_and_zero():
+                logging.error(f"Blocked {axis} homing because Z safety sequence failed")
+                self.set_status(f"{axis}-Home gesperrt: Z-Sequenz fehlgeschlagen", "error")
+                return
+
         command = f"G28 {axis}"
         if moonraker.send_gcode(command):
-            logging.info(f"Axis {axis} homed")
+            logging.info(f"Axis {axis} homed after mandatory Z safety sequence")
+            self.set_status(f"{axis} erfolgreich gehomed", "success")
+        else:
+            self.set_status(f"{axis}-Home fehlgeschlagen", "error")
 
     def home_all_axes(self, instance):
         """Home all axes via Moonraker."""
-        if moonraker.send_gcode("G28"):
-            logging.info("All axes homed")
+        if not self.ensure_z_homed_and_zero():
+            logging.error("Blocked X/Y homing because Z safety sequence failed")
+            self.set_status("Home gesperrt: Z-Sequenz fehlgeschlagen", "error")
+            return
+
+        if moonraker.send_gcode("G28 X Y"):
+            logging.info("All axes homed with mandatory sequence: Z home -> Z0 -> X/Y home")
+            self.set_status("Home fertig: Z -> Z0 -> X/Y", "success")
+        else:
+            self.set_status("X/Y Home fehlgeschlagen", "error")
 
     def disable_motors(self, instance):
         """Disable stepper motors (holding current off)."""
         if moonraker.send_gcode("M18"):
             logging.info("Motors disabled (holding current off)")
+            self.set_status("Motoren deaktiviert", "info")
+        else:
+            self.set_status("Motoren konnten nicht deaktiviert werden", "error")
 
     def load_positions(self):
         """Load positions from JSON with error handling."""
@@ -1065,7 +1161,7 @@ class LuefterScreen(Screen):
         return super().on_leave(*args)
 
     def _slider_to_pwm_percent(self, slider_value):
-        return max(0, min(100, int(round(100 - slider_value))))
+        return max(0, min(100, int(round(slider_value))))
 
     def on_pwm_slider_change(self, _slider, value):
         pwm_percent = self._slider_to_pwm_percent(value)
@@ -1079,7 +1175,7 @@ class LuefterScreen(Screen):
         pwm_percent = self._slider_to_pwm_percent(self.pwm_slider.value)
         if pwm_percent == 0:
             pwm_percent = 35
-            self.pwm_slider.value = 100 - pwm_percent
+            self.pwm_slider.value = pwm_percent
         self._send_pwm(pwm_percent)
 
     def fan_off(self, _instance):
