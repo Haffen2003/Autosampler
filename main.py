@@ -49,7 +49,7 @@ def load_config():
 
 CONFIG = load_config()
 MOONRAKER_URL = CONFIG.get('moonraker_url', 'http://localhost:7125')
-TOUCH_ROTATION = int(CONFIG.get('touch_rotation', 180))
+TOUCH_ROTATION = int(CONFIG.get('touch_rotation', 0))
 ENABLE_COCKTAIL_SCREEN = bool(CONFIG.get('enable_cocktail_screen', False))
 
 # base directories for resources
