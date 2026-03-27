@@ -44,7 +44,8 @@ def load_config():
     return {
         'moonraker_url': 'http://localhost:7125',
         'icon_dir': 'Icons',
-        'enable_cocktail_screen': False
+        'enable_cocktail_screen': False,
+        'z_safety_enabled': True
     }
 
 CONFIG = load_config()
@@ -182,6 +183,7 @@ from kivy.graphics import Color, Ellipse, Rectangle, Line
 from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.image import Image
+from kivy.uix.switch import Switch
 from kivy.properties import NumericProperty
 from kivy.clock import Clock
 from kivy.metrics import dp
@@ -697,6 +699,7 @@ class MotorPositionScreen(Screen):
         self.positions = self.load_positions()
         self.selected_circle = None
         self.z_reference_known = False
+        self.z_safety_enabled = bool(CONFIG.get('z_safety_enabled', True))
 
         self.layout = BoxLayout(orientation='vertical', padding=5, spacing=5)
 
@@ -774,6 +777,20 @@ class MotorPositionScreen(Screen):
         self.speed_input = TextInput(hint_text="Geschwindigkeit (mm/min)", multiline=False, size_hint=(1, 1), font_size=12)
         speed_row.add_widget(self.speed_input)
         input_box.add_widget(speed_row)
+
+        safety_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=35, spacing=3)
+        safety_row.add_widget(Label(text="Z-Safe:", size_hint=(None, 1), width=60, font_size=14))
+        self.z_safety_switch = Switch(active=self.z_safety_enabled, size_hint=(None, None), size=(56, 34))
+        self.z_safety_switch.bind(active=self.on_z_safety_toggle)
+        safety_row.add_widget(self.z_safety_switch)
+        self.z_safety_value_label = Label(
+            text="AN" if self.z_safety_enabled else "AUS",
+            size_hint=(None, 1),
+            width=40,
+            font_size=12
+        )
+        safety_row.add_widget(self.z_safety_value_label)
+        input_box.add_widget(safety_row)
         
         input_area.add_widget(input_box)
 
@@ -893,14 +910,18 @@ class MotorPositionScreen(Screen):
                     self.set_status("Ungültige Geschwindigkeit im Slot", "warn")
                     return
 
-                if not self.ensure_z_homed_and_zero():
-                    logging.error("Blocked XY move because Z safety sequence failed")
-                    self.set_status("XY gesperrt: zuerst Z homing + Z0 erforderlich", "error")
-                    return
+                if self.z_safety_enabled:
+                    if not self.ensure_z_homed_and_zero():
+                        logging.error("Blocked XY move because Z safety sequence failed")
+                        self.set_status("XY gesperrt: zuerst Z homing + Z0 erforderlich", "error")
+                        return
 
                 command = f"G1 X{target_x} Y{target_y} F{target_speed}"
                 if moonraker.send_gcode(command):
-                    logging.info(f"Moved to X={target_x}, Y={target_y} at V={target_speed} after Z home + Z0 safety sequence")
+                    if self.z_safety_enabled:
+                        logging.info(f"Moved to X={target_x}, Y={target_y} at V={target_speed} after Z home + Z0 safety sequence")
+                    else:
+                        logging.info(f"Moved to X={target_x}, Y={target_y} at V={target_speed} with Z safety disabled")
                     self.set_status(f"Bewegt auf X={target_x}, Y={target_y} mit V={target_speed}", "success")
                 else:
                     self.set_status("XY-Fahrt fehlgeschlagen", "error")
@@ -908,8 +929,22 @@ class MotorPositionScreen(Screen):
                 logging.warning(f"No position saved for slot {self.selected_circle.index}")
                 self.set_status("Kein Wert für gewählten Slot gespeichert", "warn")
 
+    def on_z_safety_toggle(self, _instance, active):
+        self.z_safety_enabled = bool(active)
+        self.z_safety_value_label.text = "AN" if self.z_safety_enabled else "AUS"
+        if self.z_safety_enabled:
+            logging.info("Z safety sequence enabled")
+            self.set_status("Z-Sicherheitssequenz aktiviert", "info")
+        else:
+            logging.warning("Z safety sequence disabled via debug switch")
+            self.set_status("Debug: Z-Sicherheitssequenz deaktiviert", "warn")
+
     def ensure_z_homed_and_zero(self, force_rehome=False):
         """Ensure Z is safe before XY: re-home only when required, otherwise keep Z at 0."""
+        if not self.z_safety_enabled:
+            logging.warning("Skipped Z safety sequence because debug switch is off")
+            return True
+
         if not moonraker.send_gcode("G90"):
             logging.error("Failed to set absolute positioning (G90)")
             self.set_status("Fehler: G90 konnte nicht gesetzt werden", "error")
@@ -954,12 +989,20 @@ class MotorPositionScreen(Screen):
         axis = str(axis).upper()
 
         if axis == "Z":
-            if self.ensure_z_homed_and_zero(force_rehome=True):
-                logging.info("Axis Z homed and moved to Z0")
-                self.set_status("Z gehomed und auf 0 gefahren", "success")
+            if self.z_safety_enabled:
+                if self.ensure_z_homed_and_zero(force_rehome=True):
+                    logging.info("Axis Z homed and moved to Z0")
+                    self.set_status("Z gehomed und auf 0 gefahren", "success")
+            else:
+                if moonraker.send_gcode("G28 Z"):
+                    self.z_reference_known = True
+                    logging.info("Axis Z homed (Z safety disabled)")
+                    self.set_status("Z erfolgreich gehomed", "success")
+                else:
+                    self.set_status("Z-Home fehlgeschlagen", "error")
             return
 
-        if axis in ("X", "Y"):
+        if self.z_safety_enabled and axis in ("X", "Y"):
             if not self.ensure_z_homed_and_zero(force_rehome=True):
                 logging.error(f"Blocked {axis} homing because Z safety sequence failed")
                 self.set_status(f"{axis}-Home gesperrt: Z-Sequenz fehlgeschlagen", "error")
@@ -974,14 +1017,19 @@ class MotorPositionScreen(Screen):
 
     def home_all_axes(self, instance):
         """Home all axes via Moonraker."""
-        if not self.ensure_z_homed_and_zero(force_rehome=True):
-            logging.error("Blocked X/Y homing because Z safety sequence failed")
-            self.set_status("Home gesperrt: Z-Sequenz fehlgeschlagen", "error")
-            return
+        if self.z_safety_enabled:
+            if not self.ensure_z_homed_and_zero(force_rehome=True):
+                logging.error("Blocked X/Y homing because Z safety sequence failed")
+                self.set_status("Home gesperrt: Z-Sequenz fehlgeschlagen", "error")
+                return
 
         if moonraker.send_gcode("G28 X Y"):
-            logging.info("All axes homed with mandatory sequence: Z home -> Z0 -> X/Y home")
-            self.set_status("Home fertig: Z -> Z0 -> X/Y", "success")
+            if self.z_safety_enabled:
+                logging.info("All axes homed with mandatory sequence: Z home -> Z0 -> X/Y home")
+                self.set_status("Home fertig: Z -> Z0 -> X/Y", "success")
+            else:
+                logging.info("X/Y homed (Z safety disabled)")
+                self.set_status("Home fertig: X/Y", "success")
         else:
             self.set_status("X/Y Home fehlgeschlagen", "error")
 
