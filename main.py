@@ -754,16 +754,25 @@ class MotorPositionScreen(Screen):
         update_motor_off_icon()
         motor_off_btn.bind(on_press=self.disable_motors)
 
-        home_column.add_widget(self.home_x_btn)
-        home_column.add_widget(self.home_y_btn)
-        home_column.add_widget(self.home_z_btn)
+        top_row = BoxLayout(orientation='horizontal', size_hint=(None, None), size=(134, 64), spacing=6)
+        top_row.add_widget(self.home_x_btn)
+        top_row.add_widget(Widget(size_hint=(None, None), size=(64, 64)))
 
-        home_column.add_widget(motor_off_btn)
-        home_column.add_widget(self.z_down_btn)
-        home_column.add_widget(self.z_up_btn)
+        mid_row = BoxLayout(orientation='horizontal', size_hint=(None, None), size=(134, 64), spacing=6)
+        mid_row.add_widget(self.home_y_btn)
+        mid_row.add_widget(self.z_up_btn)
 
-        bottom_home_row = BoxLayout(orientation='horizontal', size_hint=(None, None), size=(64, 64), spacing=6)
+        low_row = BoxLayout(orientation='horizontal', size_hint=(None, None), size=(134, 64), spacing=6)
+        low_row.add_widget(self.home_z_btn)
+        low_row.add_widget(self.z_down_btn)
+
+        bottom_home_row = BoxLayout(orientation='horizontal', size_hint=(None, None), size=(134, 64), spacing=6)
         bottom_home_row.add_widget(self.home_all_btn)
+        bottom_home_row.add_widget(motor_off_btn)
+
+        home_column.add_widget(top_row)
+        home_column.add_widget(mid_row)
+        home_column.add_widget(low_row)
         home_column.add_widget(bottom_home_row)
 
         top_area.add_widget(home_column)
