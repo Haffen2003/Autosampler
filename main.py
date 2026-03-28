@@ -705,6 +705,9 @@ class MotorPositionScreen(Screen):
         self.z_zero_tolerance = 0.05
         self.z_safety_enabled = bool(CONFIG.get('z_safety_enabled', True))
         self.z_move_speed = float(CONFIG.get('z_move_speed_mm_min', 1200.0))
+        self.default_slot_speed = 8000.0
+        self.max_slot_speed = 8000.0
+        self._speed_editing = False
 
         self.layout = BoxLayout(orientation='vertical', padding=5, spacing=5)
 
@@ -755,10 +758,8 @@ class MotorPositionScreen(Screen):
         home_column.add_widget(self.home_y_btn)
         home_column.add_widget(self.home_z_btn)
 
-        z_move_row = BoxLayout(orientation='horizontal', size_hint=(None, None), size=(134, 64), spacing=6)
-        z_move_row.add_widget(self.z_up_btn)
-        z_move_row.add_widget(self.z_down_btn)
-        home_column.add_widget(z_move_row)
+        home_column.add_widget(self.z_up_btn)
+        home_column.add_widget(self.z_down_btn)
 
         bottom_home_row = BoxLayout(orientation='horizontal', size_hint=(None, None), size=(134, 64), spacing=6)
         bottom_home_row.add_widget(self.home_all_btn)
@@ -789,6 +790,7 @@ class MotorPositionScreen(Screen):
         speed_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=35, spacing=3)
         speed_row.add_widget(Label(text="V:", size_hint=(None, 1), width=30, font_size=14))
         self.speed_input = TextInput(hint_text="Geschwindigkeit (mm/min)", multiline=False, size_hint=(1, 1), font_size=12)
+        self.speed_input.bind(text=self.on_speed_input_text)
         speed_row.add_widget(self.speed_input)
         input_box.add_widget(speed_row)
 
@@ -862,6 +864,47 @@ class MotorPositionScreen(Screen):
         button.disabled = not enabled
         button.opacity = 1.0 if enabled else 0.4
 
+    def _clamp_speed(self, speed_value):
+        speed = float(speed_value)
+        if speed <= 0:
+            raise ValueError
+        return min(speed, self.max_slot_speed)
+
+    def on_speed_input_text(self, instance, value):
+        if self._speed_editing:
+            return
+
+        raw = str(value).strip()
+        if raw == "":
+            return
+
+        normalized = raw.replace(',', '.')
+        try:
+            capped = self._clamp_speed(normalized)
+        except ValueError:
+            return
+
+        formatted = self._fmt_number(capped)
+        if instance.text != formatted:
+            self._speed_editing = True
+            instance.text = formatted
+            self._speed_editing = False
+
+    def default_slot_positions(self):
+        defaults = {}
+        x_values = [400.0, 300.0, 200.0, 100.0, 0.0]
+        y_values = [0.0, 80.0, 160.0]
+        index = 1
+        for y in y_values:
+            for x in x_values:
+                defaults[str(index)] = {
+                    "x": x,
+                    "y": y,
+                    "speed": self.default_slot_speed
+                }
+                index += 1
+        return defaults
+
     def wait_for_z_feedback(self, timeout_s=8.0, poll_interval_s=0.2):
         """Wait until a valid Z position can be read from Moonraker."""
         deadline = time.monotonic() + max(0.1, float(timeout_s))
@@ -930,10 +973,10 @@ class MotorPositionScreen(Screen):
         instance.set_selected(True)
         self.selected_circle = instance
 
-        pos = self.positions.get(str(instance.index), {"x": "", "y": "", "speed": 2000})
+        pos = self.positions.get(str(instance.index), {"x": "", "y": "", "speed": self.default_slot_speed})
         self.x_input.text = str(pos.get("x", ""))
         self.y_input.text = str(pos.get("y", ""))
-        self.speed_input.text = str(pos.get("speed", 2000))
+        self.speed_input.text = str(pos.get("speed", self.default_slot_speed))
         logging.info(f"Slot {instance.index} ausgewählt")
 
     def save_position(self, instance):
@@ -953,13 +996,13 @@ class MotorPositionScreen(Screen):
         try:
             x = self._parse_float(x_text)
             y = self._parse_float(y_text)
-            speed = self._parse_float(speed_text)
-            if speed <= 0:
-                raise ValueError
+            speed = self._clamp_speed(self._parse_float(speed_text))
         except ValueError:
             logging.warning("Ungültige Koordinaten oder Geschwindigkeit.")
             self.set_status("Ungültige Werte: X/Y oder Geschwindigkeit.", "warn")
             return
+
+        self.speed_input.text = self._fmt_number(speed)
 
         self.positions[str(self.selected_circle.index)] = {
             "x": x,
@@ -985,9 +1028,7 @@ class MotorPositionScreen(Screen):
                     return
 
                 try:
-                    target_speed = self._parse_float(target_speed)
-                    if target_speed <= 0:
-                        raise ValueError
+                    target_speed = self._clamp_speed(self._parse_float(target_speed))
                 except (TypeError, ValueError):
                     logging.warning(f"Invalid speed for slot {self.selected_circle.index}: {target_speed}")
                     self.set_status("Ungültige Geschwindigkeit im Slot", "warn")
@@ -1242,13 +1283,46 @@ class MotorPositionScreen(Screen):
 
     def load_positions(self):
         """Load positions from JSON with error handling."""
+        defaults = self.default_slot_positions()
+        loaded_data = {}
         if os.path.exists("positions.json"):
             try:
                 with open("positions.json", "r") as f:
-                    return json.load(f)
+                    loaded_data = json.load(f)
             except json.JSONDecodeError:
                 logging.error("positions.json is corrupted")
-        return {}
+
+        if not isinstance(loaded_data, dict):
+            loaded_data = {}
+
+        normalized = {}
+        for index in range(1, 16):
+            key = str(index)
+            default_pos = defaults[key]
+            raw_pos = loaded_data.get(key, {}) if isinstance(loaded_data.get(key, {}), dict) else {}
+
+            try:
+                x_value = self._parse_float(raw_pos.get("x", default_pos["x"]))
+            except (TypeError, ValueError):
+                x_value = default_pos["x"]
+
+            try:
+                y_value = self._parse_float(raw_pos.get("y", default_pos["y"]))
+            except (TypeError, ValueError):
+                y_value = default_pos["y"]
+
+            try:
+                speed_value = self._clamp_speed(raw_pos.get("speed", default_pos["speed"]))
+            except (TypeError, ValueError):
+                speed_value = default_pos["speed"]
+
+            normalized[key] = {
+                "x": x_value,
+                "y": y_value,
+                "speed": speed_value
+            }
+
+        return normalized
 
     def store_positions(self):
         """Store positions to JSON with error handling."""
