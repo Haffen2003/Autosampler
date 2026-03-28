@@ -857,6 +857,44 @@ class MotorPositionScreen(Screen):
         button.disabled = not enabled
         button.opacity = 1.0 if enabled else 0.4
 
+    def wait_for_z_feedback(self, timeout_s=8.0, poll_interval_s=0.2):
+        """Wait until a valid Z position can be read from Moonraker."""
+        deadline = time.monotonic() + max(0.1, float(timeout_s))
+        while time.monotonic() < deadline:
+            z_value = moonraker.get_current_z_position()
+            if z_value is not None:
+                return True, float(z_value)
+            time.sleep(max(0.05, float(poll_interval_s)))
+        return False, None
+
+    def wait_for_z_target(self, target=0.0, timeout_s=12.0, poll_interval_s=0.2, settle_time_s=0.3):
+        """Wait until Z reaches target and stays there briefly to avoid stale/early reads."""
+        target_value = float(target)
+        deadline = time.monotonic() + max(0.1, float(timeout_s))
+        reached_since = None
+        last_z = None
+
+        while time.monotonic() < deadline:
+            z_value = moonraker.get_current_z_position()
+            if z_value is None:
+                reached_since = None
+                time.sleep(max(0.05, float(poll_interval_s)))
+                continue
+
+            last_z = float(z_value)
+            if abs(last_z - target_value) <= self.z_zero_tolerance:
+                now = time.monotonic()
+                if reached_since is None:
+                    reached_since = now
+                elif (now - reached_since) >= max(0.0, float(settle_time_s)):
+                    return True, last_z
+            else:
+                reached_since = None
+
+            time.sleep(max(0.05, float(poll_interval_s)))
+
+        return False, last_z
+
     def update_xy_home_lock_state(self, refresh_z_position=True):
         if refresh_z_position:
             current_z = moonraker.get_current_z_position()
@@ -1008,6 +1046,14 @@ class MotorPositionScreen(Screen):
                 self.update_xy_home_lock_state(refresh_z_position=False)
                 return False
             self.z_reference_known = True
+            self.set_status("Warte auf Abschluss von Z-Homing...", "warn")
+            has_feedback, _z_after_home = self.wait_for_z_feedback(timeout_s=8.0, poll_interval_s=0.2)
+            if not has_feedback:
+                logging.error("No Z feedback received after homing")
+                self.z_is_zero = False
+                self.update_xy_home_lock_state(refresh_z_position=False)
+                self.set_status("Fehler: Keine Z-Rueckmeldung nach Homing", "error")
+                return False
 
         current_z = moonraker.get_current_z_position()
         if current_z is not None and abs(current_z) <= self.z_zero_tolerance:
@@ -1040,17 +1086,15 @@ class MotorPositionScreen(Screen):
             self.update_xy_home_lock_state(refresh_z_position=False)
             return False
 
-        verify_z = moonraker.get_current_z_position()
-        if verify_z is None:
-            self.z_is_zero = False
-            self.update_xy_home_lock_state(refresh_z_position=False)
-            logging.error("Could not verify Z position after Z0 move")
-            self.set_status("Fehler: Z-Position nach Z0 nicht lesbar", "error")
-            return False
-
-        if abs(verify_z) > self.z_zero_tolerance:
-            logging.error(f"Z verification failed after Z0 move: Z={verify_z:.3f}")
-            self.set_status(f"Fehler: Z ist nach Fahrt nicht 0 (Z={verify_z:.2f})", "error")
+        self.set_status("Warte bis Z=0 erreicht ist...", "warn")
+        reached_zero, verify_z = self.wait_for_z_target(target=0.0, timeout_s=10.0, poll_interval_s=0.2, settle_time_s=0.3)
+        if not reached_zero:
+            if verify_z is None:
+                logging.error("Could not verify Z position after Z0 move")
+                self.set_status("Fehler: Z-Position nach Z0 nicht lesbar", "error")
+            else:
+                logging.error(f"Z verification failed after Z0 move timeout: Z={verify_z:.3f}")
+                self.set_status(f"Fehler: Z ist nach Fahrt nicht 0 (Z={verify_z:.2f})", "error")
             self.z_is_zero = False
             self.update_xy_home_lock_state(refresh_z_position=False)
             return False
