@@ -45,7 +45,9 @@ def load_config():
         'moonraker_url': 'http://localhost:7125',
         'icon_dir': 'Icons',
         'enable_cocktail_screen': False,
-        'z_safety_enabled': True
+        'z_safety_enabled': True,
+        'z_extend_height': 15.0,
+        'z_move_speed_mm_min': 1200.0
     }
 
 CONFIG = load_config()
@@ -699,7 +701,11 @@ class MotorPositionScreen(Screen):
         self.positions = self.load_positions()
         self.selected_circle = None
         self.z_reference_known = False
+        self.z_is_zero = False
+        self.z_zero_tolerance = 0.05
         self.z_safety_enabled = bool(CONFIG.get('z_safety_enabled', True))
+        self.z_extend_height = float(CONFIG.get('z_extend_height', 15.0))
+        self.z_move_speed = float(CONFIG.get('z_move_speed_mm_min', 1200.0))
 
         self.layout = BoxLayout(orientation='vertical', padding=5, spacing=5)
 
@@ -712,24 +718,26 @@ class MotorPositionScreen(Screen):
 
         home_column = BoxLayout(orientation='vertical', size_hint=(None, 1), width=142, spacing=6)
 
-        home_x_btn = Button(text="X", size_hint=(None, None), size=(64, 64), font_size=18)
-        home_y_btn = Button(text="Y", size_hint=(None, None), size=(64, 64), font_size=18)
-        home_z_btn = Button(text="Z", size_hint=(None, None), size=(64, 64), font_size=18)
-        home_all_btn = Button(text="", size_hint=(None, None), size=(64, 64))
+        self.home_x_btn = Button(text="X", size_hint=(None, None), size=(64, 64), font_size=18)
+        self.home_y_btn = Button(text="Y", size_hint=(None, None), size=(64, 64), font_size=18)
+        self.home_z_btn = Button(text="Z", size_hint=(None, None), size=(64, 64), font_size=18)
+        self.home_all_btn = Button(text="", size_hint=(None, None), size=(64, 64))
+        self.z_extend_btn = Button(text="Z+", size_hint=(None, None), size=(64, 64), font_size=18)
 
         home_all_icon = Image(source=icon('haus.40.png'), size_hint=(None, None), size=(40, 40))
 
         def update_home_icon(*_args):
-            home_all_icon.center = home_all_btn.center
+            home_all_icon.center = self.home_all_btn.center
 
-        home_all_btn.bind(pos=update_home_icon, size=update_home_icon)
-        home_all_btn.add_widget(home_all_icon)
+        self.home_all_btn.bind(pos=update_home_icon, size=update_home_icon)
+        self.home_all_btn.add_widget(home_all_icon)
         update_home_icon()
 
-        home_x_btn.bind(on_press=partial(self.home_axis, axis='X'))
-        home_y_btn.bind(on_press=partial(self.home_axis, axis='Y'))
-        home_z_btn.bind(on_press=partial(self.home_axis, axis='Z'))
-        home_all_btn.bind(on_press=self.home_all_axes)
+        self.home_x_btn.bind(on_press=partial(self.home_axis, axis='X'))
+        self.home_y_btn.bind(on_press=partial(self.home_axis, axis='Y'))
+        self.home_z_btn.bind(on_press=partial(self.home_axis, axis='Z'))
+        self.home_all_btn.bind(on_press=self.home_all_axes)
+        self.z_extend_btn.bind(on_press=self.extend_z_axis)
 
         motor_off_btn = Button(text="", size_hint=(None, None), size=(64, 64))
         motor_off_icon = Image(source=icon('aus.40.png'), size_hint=(None, None), size=(40, 40))
@@ -742,13 +750,14 @@ class MotorPositionScreen(Screen):
         update_motor_off_icon()
         motor_off_btn.bind(on_press=self.disable_motors)
 
-        home_column.add_widget(home_x_btn)
-        home_column.add_widget(home_y_btn)
-        home_column.add_widget(home_z_btn)
+        home_column.add_widget(self.home_x_btn)
+        home_column.add_widget(self.home_y_btn)
+        home_column.add_widget(self.home_z_btn)
 
-        bottom_home_row = BoxLayout(orientation='horizontal', size_hint=(None, None), size=(134, 64), spacing=6)
-        bottom_home_row.add_widget(home_all_btn)
+        bottom_home_row = BoxLayout(orientation='horizontal', size_hint=(None, None), size=(204, 64), spacing=6)
+        bottom_home_row.add_widget(self.home_all_btn)
         bottom_home_row.add_widget(motor_off_btn)
+        bottom_home_row.add_widget(self.z_extend_btn)
         home_column.add_widget(bottom_home_row)
 
         top_area.add_widget(home_column)
@@ -822,6 +831,7 @@ class MotorPositionScreen(Screen):
         self.layout.add_widget(self.status_label)
 
         self.add_widget(self.layout)
+        self.update_xy_home_lock_state(refresh_z_position=False)
 
     def set_status(self, message, level='info'):
         """Update status text in the motor UI."""
@@ -833,6 +843,32 @@ class MotorPositionScreen(Screen):
         }
         self.status_label.text = message
         self.status_label.color = colors.get(level, colors['info'])
+
+    def _parse_float(self, text):
+        return float(str(text).strip().replace(',', '.'))
+
+    def _fmt_number(self, value):
+        as_float = float(value)
+        if as_float.is_integer():
+            return str(int(as_float))
+        return f"{as_float:.3f}".rstrip('0').rstrip('.')
+
+    def _set_button_enabled(self, button, enabled):
+        button.disabled = not enabled
+        button.opacity = 1.0 if enabled else 0.4
+
+    def update_xy_home_lock_state(self, refresh_z_position=True):
+        if refresh_z_position:
+            current_z = moonraker.get_current_z_position()
+            self.z_is_zero = current_z is not None and abs(current_z) <= self.z_zero_tolerance
+
+        if self.z_safety_enabled:
+            xy_allowed = self.z_reference_known and self.z_is_zero
+        else:
+            xy_allowed = True
+
+        self._set_button_enabled(self.home_x_btn, xy_allowed)
+        self._set_button_enabled(self.home_y_btn, xy_allowed)
 
     def draw_circles(self):
         self.slot_area.clear_widgets()
@@ -868,9 +904,9 @@ class MotorPositionScreen(Screen):
             return
 
         try:
-            x = float(x_text)
-            y = float(y_text)
-            speed = float(speed_text)
+            x = self._parse_float(x_text)
+            y = self._parse_float(y_text)
+            speed = self._parse_float(speed_text)
             if speed <= 0:
                 raise ValueError
         except ValueError:
@@ -902,7 +938,7 @@ class MotorPositionScreen(Screen):
                     return
 
                 try:
-                    target_speed = float(target_speed)
+                    target_speed = self._parse_float(target_speed)
                     if target_speed <= 0:
                         raise ValueError
                 except (TypeError, ValueError):
@@ -916,13 +952,22 @@ class MotorPositionScreen(Screen):
                         self.set_status("XY gesperrt: zuerst Z homing + Z0 erforderlich", "error")
                         return
 
-                command = f"G1 X{target_x} Y{target_y} F{target_speed}"
+                if not moonraker.send_gcode("G90"):
+                    self.set_status("Fehler: G90 konnte nicht gesetzt werden", "error")
+                    return
+
+                speed_value = self._fmt_number(target_speed)
+                if not moonraker.send_gcode(f"G1 F{speed_value}"):
+                    self.set_status("Fehler: Geschwindigkeit konnte nicht gesetzt werden", "error")
+                    return
+
+                command = f"G1 X{self._fmt_number(target_x)} Y{self._fmt_number(target_y)}"
                 if moonraker.send_gcode(command):
                     if self.z_safety_enabled:
-                        logging.info(f"Moved to X={target_x}, Y={target_y} at V={target_speed} after Z home + Z0 safety sequence")
+                        logging.info(f"Moved to X={target_x}, Y={target_y} with F={speed_value} after Z home + Z0 safety sequence")
                     else:
-                        logging.info(f"Moved to X={target_x}, Y={target_y} at V={target_speed} with Z safety disabled")
-                    self.set_status(f"Bewegt auf X={target_x}, Y={target_y} mit V={target_speed}", "success")
+                        logging.info(f"Moved to X={target_x}, Y={target_y} with F={speed_value} while Z safety disabled")
+                    self.set_status(f"Bewegt auf X={target_x}, Y={target_y} mit F={speed_value}", "success")
                 else:
                     self.set_status("XY-Fahrt fehlgeschlagen", "error")
             else:
@@ -932,6 +977,7 @@ class MotorPositionScreen(Screen):
     def on_z_safety_toggle(self, _instance, active):
         self.z_safety_enabled = bool(active)
         self.z_safety_value_label.text = "AN" if self.z_safety_enabled else "AUS"
+        self.update_xy_home_lock_state(refresh_z_position=True)
         if self.z_safety_enabled:
             logging.info("Z safety sequence enabled")
             self.set_status("Z-Sicherheitssequenz aktiviert", "info")
@@ -943,6 +989,7 @@ class MotorPositionScreen(Screen):
         """Ensure Z is safe before XY: re-home only when required, otherwise keep Z at 0."""
         if not self.z_safety_enabled:
             logging.warning("Skipped Z safety sequence because debug switch is off")
+            self.update_xy_home_lock_state(refresh_z_position=True)
             return True
 
         if not moonraker.send_gcode("G90"):
@@ -956,11 +1003,16 @@ class MotorPositionScreen(Screen):
             if not moonraker.send_gcode("G28 Z"):
                 logging.error("Failed to home Z axis")
                 self.set_status("Fehler: Z konnte nicht gehomed werden", "error")
+                self.z_reference_known = False
+                self.z_is_zero = False
+                self.update_xy_home_lock_state(refresh_z_position=False)
                 return False
             self.z_reference_known = True
 
         current_z = moonraker.get_current_z_position()
-        if current_z is not None and abs(current_z) <= 0.05:
+        if current_z is not None and abs(current_z) <= self.z_zero_tolerance:
+            self.z_is_zero = True
+            self.update_xy_home_lock_state(refresh_z_position=False)
             if requires_reference:
                 logging.info("Z homed and already at Z0")
                 self.set_status("Z-Sicherheitssequenz abgeschlossen (Z homed + Z0)", "success")
@@ -968,18 +1020,43 @@ class MotorPositionScreen(Screen):
                 self.set_status("Z bereits auf 0", "info")
             return True
 
+        if current_z is None:
+            self.z_is_zero = False
+            self.update_xy_home_lock_state(refresh_z_position=False)
+            logging.error("Could not verify current Z position")
+            self.set_status("Fehler: Z-Position konnte nicht gelesen werden", "error")
+            return False
+
         self.set_status("Sicherheitssequenz: Z auf 0 fahren...", "warn")
+        if not moonraker.send_gcode(f"G1 F{self._fmt_number(self.z_move_speed)}"):
+            logging.error("Failed to set Z move speed")
+            self.set_status("Fehler: Z-Geschwindigkeit konnte nicht gesetzt werden", "error")
+            return False
+
         if not moonraker.send_gcode("G1 Z0"):
             logging.error("Failed to move Z to 0")
             self.set_status("Fehler: Z konnte nicht auf 0 fahren", "error")
+            self.z_is_zero = False
+            self.update_xy_home_lock_state(refresh_z_position=False)
             return False
 
         verify_z = moonraker.get_current_z_position()
-        if verify_z is not None and abs(verify_z) > 0.05:
-            logging.error(f"Z verification failed after Z0 move: Z={verify_z:.3f}")
-            self.set_status(f"Fehler: Z ist nach Fahrt nicht 0 (Z={verify_z:.2f})", "error")
+        if verify_z is None:
+            self.z_is_zero = False
+            self.update_xy_home_lock_state(refresh_z_position=False)
+            logging.error("Could not verify Z position after Z0 move")
+            self.set_status("Fehler: Z-Position nach Z0 nicht lesbar", "error")
             return False
 
+        if abs(verify_z) > self.z_zero_tolerance:
+            logging.error(f"Z verification failed after Z0 move: Z={verify_z:.3f}")
+            self.set_status(f"Fehler: Z ist nach Fahrt nicht 0 (Z={verify_z:.2f})", "error")
+            self.z_is_zero = False
+            self.update_xy_home_lock_state(refresh_z_position=False)
+            return False
+
+        self.z_is_zero = True
+        self.update_xy_home_lock_state(refresh_z_position=False)
         logging.info("Z safety sequence complete: Z ready at 0")
         self.set_status("Z-Sicherheitssequenz abgeschlossen (Z0 bestätigt)", "success")
         return True
@@ -996,6 +1073,8 @@ class MotorPositionScreen(Screen):
             else:
                 if moonraker.send_gcode("G28 Z"):
                     self.z_reference_known = True
+                    self.z_is_zero = False
+                    self.update_xy_home_lock_state(refresh_z_position=True)
                     logging.info("Axis Z homed (Z safety disabled)")
                     self.set_status("Z erfolgreich gehomed", "success")
                 else:
@@ -1003,9 +1082,10 @@ class MotorPositionScreen(Screen):
             return
 
         if self.z_safety_enabled and axis in ("X", "Y"):
-            if not self.ensure_z_homed_and_zero(force_rehome=True):
-                logging.error(f"Blocked {axis} homing because Z safety sequence failed")
-                self.set_status(f"{axis}-Home gesperrt: Z-Sequenz fehlgeschlagen", "error")
+            if not (self.z_reference_known and self.z_is_zero):
+                logging.warning(f"Blocked {axis} home: Z not homed and at 0")
+                self.update_xy_home_lock_state(refresh_z_position=True)
+                self.set_status(f"{axis}-Home gesperrt: erst Z homen und auf 0 fahren", "warn")
                 return
 
         command = f"G28 {axis}"
@@ -1033,10 +1113,36 @@ class MotorPositionScreen(Screen):
         else:
             self.set_status("X/Y Home fehlgeschlagen", "error")
 
+    def extend_z_axis(self, _instance):
+        """Move Z upwards for access/service while keeping XY safety guarantees."""
+        if self.z_safety_enabled:
+            if not self.ensure_z_homed_and_zero(force_rehome=not self.z_reference_known):
+                self.set_status("Z+ gesperrt: Z-Referenz fehlt oder Z0 nicht erreicht", "error")
+                return
+
+        if not moonraker.send_gcode("G90"):
+            self.set_status("Fehler: G90 konnte nicht gesetzt werden", "error")
+            return
+
+        if not moonraker.send_gcode(f"G1 F{self._fmt_number(self.z_move_speed)}"):
+            self.set_status("Fehler: Z-Geschwindigkeit konnte nicht gesetzt werden", "error")
+            return
+
+        target_z = self._fmt_number(self.z_extend_height)
+        if moonraker.send_gcode(f"G1 Z{target_z}"):
+            self.z_is_zero = False
+            self.update_xy_home_lock_state(refresh_z_position=False)
+            logging.info(f"Z moved to service height: Z={target_z}")
+            self.set_status(f"Z ausgefahren auf {target_z}", "success")
+        else:
+            self.set_status("Z-Ausfahren fehlgeschlagen", "error")
+
     def disable_motors(self, instance):
         """Disable stepper motors (holding current off)."""
         if moonraker.send_gcode("M18"):
             self.z_reference_known = False
+            self.z_is_zero = False
+            self.update_xy_home_lock_state(refresh_z_position=False)
             logging.info("Motors disabled (holding current off)")
             self.set_status("Motoren deaktiviert", "info")
         else:
