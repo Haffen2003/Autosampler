@@ -313,14 +313,15 @@ class MoonrakerClient:
         self.base_url = (base_url or MOONRAKER_URL).rstrip('/')
         self.timeout = 5
 
-    def send_gcode(self, gcode: str):
+    def send_gcode(self, gcode: str, timeout_s=None):
         """Send G-code to printer via Moonraker API with error handling."""
         url = f"{self.base_url}/printer/gcode/script"
+        request_timeout = self.timeout if timeout_s is None else max(0.1, float(timeout_s))
         try:
             resp = requests.post(
                 url,
                 json={"script": gcode},
-                timeout=self.timeout
+                timeout=request_timeout
             )
             if resp.status_code not in [200, 204]:
                 logging.error(f'Moonraker error {resp.status_code}: {resp.text}')
@@ -328,7 +329,7 @@ class MoonrakerClient:
             logging.info(f'G-code sent: {gcode}')
             return True
         except requests.exceptions.Timeout:
-            logging.error(f'Timeout sending G-code to {url}')
+            logging.error(f'Timeout sending G-code to {url} (timeout={request_timeout}s)')
             return False
         except requests.exceptions.ConnectionError:
             logging.error(f'Cannot connect to Moonraker at {self.base_url}')
@@ -1037,40 +1038,24 @@ class MotorPositionScreen(Screen):
 
         requires_reference = force_rehome or not self.z_reference_known
         if requires_reference:
-            self.set_status("Sicherheitssequenz: Z homen und auf 0 fahren...", "warn")
-            z_sequence = (
-                "G90\n"
-                "G28 Z\n"
-                f"G1 F{self._fmt_number(self.z_move_speed)}\n"
-                "G1 Z0"
-            )
-            if not moonraker.send_gcode(z_sequence):
-                logging.error("Failed to execute combined Z home + Z0 sequence")
-                self.set_status("Fehler: Z-Homing/Z0 Sequenz fehlgeschlagen", "error")
+            self.set_status("Sicherheitssequenz: Z wird gehomed...", "warn")
+            if not moonraker.send_gcode("G28 Z", timeout_s=45.0):
+                logging.error("Failed to home Z axis")
+                self.set_status("Fehler: Z konnte nicht gehomed werden", "error")
                 self.z_reference_known = False
                 self.z_is_zero = False
                 self.update_xy_home_lock_state(refresh_z_position=False)
                 return False
 
             self.z_reference_known = True
-            self.set_status("Warte auf Abschluss von Z-Homing und Z0...", "warn")
-            reached_zero, verify_z = self.wait_for_z_target(target=0.0, timeout_s=25.0, poll_interval_s=0.2, settle_time_s=0.3)
-            if not reached_zero:
-                if verify_z is None:
-                    logging.error("No Z feedback after combined Z home + Z0 sequence")
-                    self.set_status("Fehler: Keine Z-Rueckmeldung nach Z-Homing", "error")
-                else:
-                    logging.error(f"Z did not reach 0 after combined sequence: Z={verify_z:.3f}")
-                    self.set_status(f"Fehler: Z ist nicht auf 0 (Z={verify_z:.2f})", "error")
+            self.set_status("Warte auf Abschluss von Z-Homing...", "warn")
+            has_feedback, _z_after_home = self.wait_for_z_feedback(timeout_s=12.0, poll_interval_s=0.2)
+            if not has_feedback:
+                logging.error("No Z feedback received after homing")
+                self.set_status("Fehler: Keine Z-Rueckmeldung nach Z-Homing", "error")
                 self.z_is_zero = False
                 self.update_xy_home_lock_state(refresh_z_position=False)
                 return False
-
-            self.z_is_zero = True
-            self.update_xy_home_lock_state(refresh_z_position=False)
-            logging.info("Z safety sequence complete after combined homing: Z ready at 0")
-            self.set_status("Z-Sicherheitssequenz abgeschlossen (Z homed + Z0)", "success")
-            return True
 
         current_z = moonraker.get_current_z_position()
         if current_z is not None and abs(current_z) <= self.z_zero_tolerance:
@@ -1096,7 +1081,7 @@ class MotorPositionScreen(Screen):
             self.set_status("Fehler: Z-Geschwindigkeit konnte nicht gesetzt werden", "error")
             return False
 
-        if not moonraker.send_gcode("G1 Z0"):
+        if not moonraker.send_gcode("G1 Z0", timeout_s=25.0):
             logging.error("Failed to move Z to 0")
             self.set_status("Fehler: Z konnte nicht auf 0 fahren", "error")
             self.z_is_zero = False
@@ -1132,7 +1117,7 @@ class MotorPositionScreen(Screen):
                     logging.info("Axis Z homed and moved to Z0")
                     self.set_status("Z gehomed und auf 0 gefahren", "success")
             else:
-                if moonraker.send_gcode("G28 Z"):
+                if moonraker.send_gcode("G28 Z", timeout_s=45.0):
                     self.z_reference_known = True
                     self.z_is_zero = False
                     self.update_xy_home_lock_state(refresh_z_position=True)
