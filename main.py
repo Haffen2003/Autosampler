@@ -698,6 +698,9 @@ class PreparationScreen(Screen):
 class MotorPositionScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.default_slot_speed = 8000.0
+        self.max_slot_speed = 8000.0
+        self._speed_editing = False
         self.positions = self.load_positions()
         self.selected_circle = None
         self.z_reference_known = False
@@ -705,9 +708,6 @@ class MotorPositionScreen(Screen):
         self.z_zero_tolerance = 0.05
         self.z_safety_enabled = bool(CONFIG.get('z_safety_enabled', True))
         self.z_move_speed = float(CONFIG.get('z_move_speed_mm_min', 1200.0))
-        self.default_slot_speed = 8000.0
-        self.max_slot_speed = 8000.0
-        self._speed_editing = False
 
         self.layout = BoxLayout(orientation='vertical', padding=5, spacing=5)
 
