@@ -1345,8 +1345,73 @@ class MotorPositionScreen(Screen):
 class PumpScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.layout = FloatLayout()
-        self.add_widget(self.layout)
+        root = BoxLayout(orientation='horizontal', padding=[14, 14, 14, 14], spacing=14)
+
+        left_controls = BoxLayout(
+            orientation='vertical',
+            size_hint=(None, 1),
+            width=220,
+            spacing=10
+        )
+
+        title = Label(
+            text="Pumpe",
+            size_hint_y=None,
+            height=46,
+            font_size=24,
+            color=[1, 1, 1, 1]
+        )
+        left_controls.add_widget(title)
+
+        pump_on_btn = Button(text="Ein", size_hint_y=None, height=66, font_size=22)
+        pump_off_btn = Button(text="Aus", size_hint_y=None, height=66, font_size=22)
+        pump_on_btn.bind(on_press=self.pump_on)
+        pump_off_btn.bind(on_press=self.pump_off)
+
+        left_controls.add_widget(pump_on_btn)
+        left_controls.add_widget(pump_off_btn)
+        left_controls.add_widget(Widget())
+
+        right_content = BoxLayout(orientation='vertical', padding=[12, 4, 12, 4], spacing=8)
+        right_content.add_widget(Label(
+            text="Steuerung über GCode:\nSET_PIN PIN=pumpe VALUE=1/0",
+            halign='left',
+            valign='middle',
+            font_size=18,
+            color=[0.9, 0.95, 1, 1]
+        ))
+
+        self.status_label = Label(
+            text="",
+            size_hint_y=None,
+            height=40,
+            font_size=16,
+            color=[1, 1, 1, 0.95]
+        )
+        right_content.add_widget(Widget())
+        right_content.add_widget(self.status_label)
+
+        root.add_widget(left_controls)
+        root.add_widget(right_content)
+        self.add_widget(root)
+
+    def pump_on(self, _instance):
+        command = "SET_PIN PIN=pumpe VALUE=1"
+        if moonraker.send_gcode(command):
+            self.status_label.text = "Pumpe eingeschaltet"
+            logging.info("Pump enabled via SET_PIN")
+        else:
+            self.status_label.text = "Fehler: Pumpe konnte nicht eingeschaltet werden"
+            logging.error("Failed to enable pump")
+
+    def pump_off(self, _instance):
+        command = "SET_PIN PIN=pumpe VALUE=0"
+        if moonraker.send_gcode(command):
+            self.status_label.text = "Pumpe ausgeschaltet"
+            logging.info("Pump disabled via SET_PIN")
+        else:
+            self.status_label.text = "Fehler: Pumpe konnte nicht ausgeschaltet werden"
+            logging.error("Failed to disable pump")
 
 
 class FanCurveGraph(Widget):
