@@ -1345,9 +1345,12 @@ class MotorPositionScreen(Screen):
 class SyringeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.syringe_speed_mm_s = 5.0
-        self.syringe_home_travel_mm = 250.0
-        self.syringe_position_mm = 0.0
+        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 0.8))
+        self.syringe_min_pos_mm = float(CONFIG.get('syringe_min_pos_mm', 0.0))
+        self.syringe_max_pos_mm = float(CONFIG.get('syringe_max_pos_mm', 100.0))
+        self.syringe_home_seek_mm = float(CONFIG.get('syringe_home_seek_mm', 80.0))
+        self.syringe_home_direction = str(CONFIG.get('syringe_home_direction', 'min')).lower()
+        self.syringe_position_mm = float(CONFIG.get('syringe_start_pos_mm', self.syringe_min_pos_mm))
 
         root = FloatLayout()
 
@@ -1462,9 +1465,13 @@ class SyringeScreen(Screen):
         logging.error(f"Syringe command failed: {command}")
         return False
 
-    def _try_home_in_direction(self, distance_mm):
+    def _clamp_syringe_target(self, target_mm):
+        return max(self.syringe_min_pos_mm, min(float(target_mm), self.syringe_max_pos_mm))
+
+    def _try_home_target(self, target_mm):
+        clamped_target = self._clamp_syringe_target(target_mm)
         command = (
-            f"MANUAL_STEPPER STEPPER=syringe MOVE={distance_mm:.3f} "
+            f"MANUAL_STEPPER STEPPER=syringe MOVE={clamped_target:.3f} "
             f"SPEED={self.syringe_speed_mm_s:.3f} STOP_ON_ENDSTOP=1"
         )
         return moonraker.send_gcode(command)
@@ -1473,13 +1480,30 @@ class SyringeScreen(Screen):
         if not self._send_syringe_stepper_command("MANUAL_STEPPER STEPPER=syringe ENABLE=1"):
             return
 
-        forward_ok = self._try_home_in_direction(self.syringe_home_travel_mm)
-        if not forward_ok:
-            logging.warning("Syringe home forward failed, trying reverse direction")
-            reverse_ok = self._try_home_in_direction(-self.syringe_home_travel_mm)
-            if not reverse_ok:
-                self.status_label.text = "Home fehlgeschlagen: kein Endstop-Trigger"
-                logging.error("Syringe homing failed in both directions")
+        midpoint = (self.syringe_min_pos_mm + self.syringe_max_pos_mm) / 2.0
+        if not self._send_syringe_stepper_command(
+            f"MANUAL_STEPPER STEPPER=syringe SET_POSITION={midpoint:.3f}"
+        ):
+            return
+        self.syringe_position_mm = midpoint
+
+        seek_distance = abs(self.syringe_home_seek_mm)
+        primary_to_min = self.syringe_home_direction != 'max'
+
+        if primary_to_min:
+            primary_target = midpoint - seek_distance
+            fallback_target = midpoint + seek_distance
+        else:
+            primary_target = midpoint + seek_distance
+            fallback_target = midpoint - seek_distance
+
+        primary_ok = self._try_home_target(primary_target)
+        if not primary_ok:
+            logging.warning("Syringe home primary direction failed, trying opposite direction")
+            fallback_ok = self._try_home_target(fallback_target)
+            if not fallback_ok:
+                self.status_label.text = "Home fehlgeschlagen: Endstop nicht erreicht"
+                logging.error("Syringe homing failed in both clamped directions")
                 return
 
         if not self._send_syringe_stepper_command("MANUAL_STEPPER STEPPER=syringe SET_POSITION=0"):
@@ -1487,20 +1511,30 @@ class SyringeScreen(Screen):
 
         self.syringe_position_mm = 0.0
         self.status_label.text = "Spritze gehomed"
-        logging.info("Syringe homed via manual_stepper with directional fallback")
+        logging.info("Syringe homed via manual_stepper with clamped seek")
 
     def move_syringe_mm(self, distance_mm):
+        if not self._send_syringe_stepper_command("MANUAL_STEPPER STEPPER=syringe ENABLE=1"):
+            return
+
         distance = float(distance_mm)
-        target_position = self.syringe_position_mm + distance
+        raw_target = self.syringe_position_mm + distance
+        target_position = self._clamp_syringe_target(raw_target)
+
+        if abs(target_position - self.syringe_position_mm) < 1e-6:
+            self.status_label.text = "Grenze erreicht: keine weitere Bewegung möglich"
+            return
+
         command = (
             f"MANUAL_STEPPER STEPPER=syringe MOVE={target_position:.3f} "
             f"SPEED={self.syringe_speed_mm_s:.3f}"
         )
         if self._send_syringe_stepper_command(command):
+            moved_distance = target_position - self.syringe_position_mm
             self.syringe_position_mm = target_position
-            direction_text = "hoch" if distance > 0 else "runter"
-            self.status_label.text = f"Spritze {direction_text}: {abs(distance):.0f} mm"
-            logging.info(f"Syringe moved {distance} mm to target {target_position} mm")
+            direction_text = "hoch" if moved_distance > 0 else "runter"
+            self.status_label.text = f"Spritze {direction_text}: {abs(moved_distance):.1f} mm"
+            logging.info(f"Syringe moved {moved_distance} mm to target {target_position} mm")
 
 
 class FanCurveGraph(Widget):
