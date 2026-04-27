@@ -1345,6 +1345,12 @@ class MotorPositionScreen(Screen):
 class SyringeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 0.8))
+        self.syringe_min_pos_mm = float(CONFIG.get('syringe_min_pos_mm', 0.0))
+        self.syringe_max_pos_mm = float(CONFIG.get('syringe_max_pos_mm', 100.0))
+        self.syringe_home_seek_mm = float(CONFIG.get('syringe_home_seek_mm', 80.0))
+        self.syringe_home_direction = str(CONFIG.get('syringe_home_direction', 'min')).lower()
+        self.syringe_position_mm = float(CONFIG.get('syringe_start_pos_mm', self.syringe_min_pos_mm))
 
         root = BoxLayout(orientation='vertical', padding=[20, 20, 20, 20], spacing=16)
 
@@ -1355,6 +1361,33 @@ class SyringeScreen(Screen):
             font_size=24,
             color=[1, 1, 1, 1]
         ))
+
+        home_anchor = AnchorLayout(anchor_x='left', anchor_y='top', size_hint=(1, None), height=80)
+        home_btn = Button(
+            text="Home",
+            size_hint=(None, None),
+            size=(200, 66),
+            font_size=22
+        )
+        home_btn.bind(on_press=self.home_syringe)
+        home_anchor.add_widget(home_btn)
+        root.add_widget(home_anchor)
+
+        forward_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=72, spacing=12)
+        forward_row.add_widget(Label(text="Vor", size_hint=(None, 1), width=90, font_size=20))
+        for step in (1, 5, 10):
+            step_btn = Button(text=f"+{step} mm", font_size=18)
+            step_btn.bind(on_press=lambda _btn, distance=step: self.move_syringe_mm(distance))
+            forward_row.add_widget(step_btn)
+        root.add_widget(forward_row)
+
+        backward_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=72, spacing=12)
+        backward_row.add_widget(Label(text="Zurück", size_hint=(None, 1), width=90, font_size=20))
+        for step in (1, 5, 10):
+            step_btn = Button(text=f"-{step} mm", font_size=18)
+            step_btn.bind(on_press=lambda _btn, distance=-step: self.move_syringe_mm(distance))
+            backward_row.add_widget(step_btn)
+        root.add_widget(backward_row)
 
         taster_btn = Button(
             text="Taster",
@@ -1380,6 +1413,77 @@ class SyringeScreen(Screen):
         root.add_widget(self.result_label)
 
         self.add_widget(root)
+
+    def _send_syringe_command(self, command, error_message):
+        if moonraker.send_gcode(command):
+            return True
+        self.result_label.text = error_message
+        logging.error(f"Syringe command failed: {command}")
+        return False
+
+    def _clamp_syringe_target(self, target_mm):
+        return max(self.syringe_min_pos_mm, min(float(target_mm), self.syringe_max_pos_mm))
+
+    def home_syringe(self, _instance):
+        if not self._send_syringe_command(
+            "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
+            "Fehler: Spritze konnte nicht aktiviert werden"
+        ):
+            return
+
+        midpoint = (self.syringe_min_pos_mm + self.syringe_max_pos_mm) / 2.0
+        if not self._send_syringe_command(
+            f"MANUAL_STEPPER STEPPER=syringe SET_POSITION={midpoint:.3f}",
+            "Fehler: Spritzenposition konnte nicht gesetzt werden"
+        ):
+            return
+
+        self.syringe_position_mm = midpoint
+        seek_distance = abs(self.syringe_home_seek_mm)
+        if self.syringe_home_direction == 'max':
+            target = self._clamp_syringe_target(midpoint + seek_distance)
+        else:
+            target = self._clamp_syringe_target(midpoint - seek_distance)
+
+        if not self._send_syringe_command(
+            f"MANUAL_STEPPER STEPPER=syringe MOVE={target:.3f} SPEED={self.syringe_speed_mm_s:.3f} STOP_ON_ENDSTOP=1",
+            "Fehler: Home fehlgeschlagen"
+        ):
+            return
+
+        if not self._send_syringe_command(
+            "MANUAL_STEPPER STEPPER=syringe SET_POSITION=0",
+            "Fehler: Home-Position konnte nicht gesetzt werden"
+        ):
+            return
+
+        self.syringe_position_mm = 0.0
+        self.result_label.text = "Spritze gehomed"
+        logging.info("Syringe homed")
+
+    def move_syringe_mm(self, distance_mm):
+        if not self._send_syringe_command(
+            "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
+            "Fehler: Spritze konnte nicht aktiviert werden"
+        ):
+            return
+
+        target_position = self._clamp_syringe_target(self.syringe_position_mm + float(distance_mm))
+        if abs(target_position - self.syringe_position_mm) < 1e-6:
+            self.result_label.text = "Grenze erreicht: keine weitere Bewegung möglich"
+            return
+
+        if not self._send_syringe_command(
+            f"MANUAL_STEPPER STEPPER=syringe MOVE={target_position:.3f} SPEED={self.syringe_speed_mm_s:.3f}",
+            "Fehler: Spritze konnte nicht bewegt werden"
+        ):
+            return
+
+        moved_distance = target_position - self.syringe_position_mm
+        self.syringe_position_mm = target_position
+        direction_text = "vor" if moved_distance > 0 else "zurück"
+        self.result_label.text = f"Spritze {direction_text}: {abs(moved_distance):.1f} mm"
+        logging.info(f"Syringe moved {moved_distance} mm to target {target_position} mm")
 
     def query_endstops(self, _instance):
         self.result_label.text = "Abfrage läuft…"
