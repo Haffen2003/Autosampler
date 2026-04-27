@@ -1349,7 +1349,7 @@ class SyringeScreen(Screen):
         self.syringe_accel_mm_s2 = float(CONFIG.get('syringe_accel_mm_s2', 2.0))
         self.syringe_min_pos_mm = float(CONFIG.get('syringe_min_pos_mm', -200.0))
         self.syringe_max_pos_mm = float(CONFIG.get('syringe_max_pos_mm', 200.0))
-        self.syringe_home_coarse_mm = float(CONFIG.get('syringe_home_coarse_mm', 100.0))
+        self.syringe_home_coarse_mm = float(CONFIG.get('syringe_home_coarse_mm', 200.0))
         self.syringe_home_backoff_mm = float(CONFIG.get('syringe_home_backoff_mm', 2.0))
         self.syringe_home_fine_mm = float(CONFIG.get('syringe_home_fine_mm', 5.0))
         self.syringe_home_two_stage = bool(CONFIG.get('syringe_home_two_stage', True))
@@ -1397,7 +1397,7 @@ class SyringeScreen(Screen):
         forward_row.add_widget(Label(text="Vor", size_hint=(None, 1), width=90, font_size=20))
         for step in (1, 5, 10):
             step_btn = Button(text=f"+{step} mm", font_size=18)
-            step_btn.bind(on_press=lambda _btn, distance=step: self.move_syringe_mm(distance))
+            step_btn.bind(on_press=lambda _btn, distance=-step: self.move_syringe_mm(distance))
             forward_row.add_widget(step_btn)
         root.add_widget(forward_row)
 
@@ -1405,7 +1405,7 @@ class SyringeScreen(Screen):
         backward_row.add_widget(Label(text="Zurück", size_hint=(None, 1), width=90, font_size=20))
         for step in (1, 5, 10):
             step_btn = Button(text=f"-{step} mm", font_size=18)
-            step_btn.bind(on_press=lambda _btn, distance=-step: self.move_syringe_mm(distance))
+            step_btn.bind(on_press=lambda _btn, distance=step: self.move_syringe_mm(distance))
             backward_row.add_widget(step_btn)
         root.add_widget(backward_row)
 
