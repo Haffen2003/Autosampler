@@ -1409,17 +1409,19 @@ class SyringeScreen(Screen):
             backward_row.add_widget(step_btn)
         root.add_widget(backward_row)
 
-        taster_btn = Button(
-            text="Taster",
-            size_hint=(None, None),
-            size=(200, 66),
-            font_size=22
-        )
-        taster_btn.bind(on_press=self.query_endstops)
+        diag_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=72, spacing=12)
+        taster_btn = Button(text="Taster", font_size=20)
+        enable_btn = Button(text="Enable", font_size=20)
+        dump_tmc_btn = Button(text="Dump TMC", font_size=20)
 
-        btn_anchor = AnchorLayout(anchor_x='left', anchor_y='top', size_hint=(1, None), height=80)
-        btn_anchor.add_widget(taster_btn)
-        root.add_widget(btn_anchor)
+        taster_btn.bind(on_press=self.query_endstops)
+        enable_btn.bind(on_press=self.enable_syringe_stepper)
+        dump_tmc_btn.bind(on_press=self.dump_tmc_syringe)
+
+        diag_row.add_widget(taster_btn)
+        diag_row.add_widget(enable_btn)
+        diag_row.add_widget(dump_tmc_btn)
+        root.add_widget(diag_row)
 
         self.result_label = Label(
             text="",
@@ -1551,6 +1553,30 @@ class SyringeScreen(Screen):
         relevant = [l for l in lines if 'endstop' in l.lower() or 'QUERY' in l]
         self.result_label.text = "\n".join(relevant) if relevant else "\n".join(lines[-10:])
         logging.info("QUERY_ENDSTOPS result displayed")
+
+    def enable_syringe_stepper(self, _instance):
+        if self._send_syringe_command(
+            "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
+            "Fehler: ENABLE fehlgeschlagen"
+        ):
+            self.result_label.text = "Spritze aktiviert (ENABLE=1)"
+            logging.info("Syringe stepper enabled")
+
+    def dump_tmc_syringe(self, _instance):
+        self.result_label.text = "DUMP_TMC läuft…"
+        if not self._send_syringe_command(
+            "DUMP_TMC STEPPER=syringe",
+            "Fehler: DUMP_TMC fehlgeschlagen"
+        ):
+            return
+
+        lines = moonraker.get_console_lines(count=40)
+        relevant = [
+            line for line in lines
+            if 'tmc' in line.lower() or 'driver' in line.lower() or 'syringe' in line.lower()
+        ]
+        self.result_label.text = "\n".join(relevant[-12:]) if relevant else "DUMP_TMC gesendet"
+        logging.info("DUMP_TMC result displayed")
 
 
 class FanCurveGraph(Widget):
