@@ -1345,6 +1345,10 @@ class MotorPositionScreen(Screen):
 class SyringeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.syringe_speed_mm_s = 5.0
+        self.syringe_home_travel_mm = 250.0
+        self.syringe_position_mm = 0.0
+
         root = FloatLayout()
 
         content = BoxLayout(
@@ -1406,7 +1410,7 @@ class SyringeScreen(Screen):
         menu_panel = BoxLayout(
             orientation='vertical',
             size_hint=(None, None),
-            size=(220, 130),
+            size=(280, 210),
             spacing=8,
             pos_hint={'right': 0.985, 'top': 0.985}
         )
@@ -1420,46 +1424,36 @@ class SyringeScreen(Screen):
         )
         menu_panel.add_widget(menu_title)
 
-        self.menu_spinner = Spinner(
-            text="Aktion wählen",
-            values=(
-                "Home",
-                "Hoch 1 mm",
-                "Hoch 5 mm",
-                "Hoch 10 mm",
-                "Runter 1 mm",
-                "Runter 5 mm",
-                "Runter 10 mm"
-            ),
-            size_hint=(1, None),
-            height=46,
-            font_size=16
-        )
-        self.menu_spinner.bind(text=self.on_menu_action)
-        menu_panel.add_widget(self.menu_spinner)
+        home_btn = Button(text="Home", size_hint=(1, None), height=46, font_size=18)
+        home_btn.bind(on_press=lambda _btn: self.home_syringe())
+        menu_panel.add_widget(home_btn)
+
+        up_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=54, spacing=8)
+        up_1_btn = Button(text="+1 mm", font_size=16)
+        up_5_btn = Button(text="+5 mm", font_size=16)
+        up_10_btn = Button(text="+10 mm", font_size=16)
+        up_1_btn.bind(on_press=lambda _btn: self.move_syringe_mm(1))
+        up_5_btn.bind(on_press=lambda _btn: self.move_syringe_mm(5))
+        up_10_btn.bind(on_press=lambda _btn: self.move_syringe_mm(10))
+        up_row.add_widget(up_1_btn)
+        up_row.add_widget(up_5_btn)
+        up_row.add_widget(up_10_btn)
+        menu_panel.add_widget(up_row)
+
+        down_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=54, spacing=8)
+        down_1_btn = Button(text="-1 mm", font_size=16)
+        down_5_btn = Button(text="-5 mm", font_size=16)
+        down_10_btn = Button(text="-10 mm", font_size=16)
+        down_1_btn.bind(on_press=lambda _btn: self.move_syringe_mm(-1))
+        down_5_btn.bind(on_press=lambda _btn: self.move_syringe_mm(-5))
+        down_10_btn.bind(on_press=lambda _btn: self.move_syringe_mm(-10))
+        down_row.add_widget(down_1_btn)
+        down_row.add_widget(down_5_btn)
+        down_row.add_widget(down_10_btn)
+        menu_panel.add_widget(down_row)
 
         root.add_widget(menu_panel)
         self.add_widget(root)
-
-    def on_menu_action(self, _spinner, action_text):
-        if action_text == "Aktion wählen":
-            return
-
-        action_map = {
-            "Home": self.home_syringe,
-            "Hoch 1 mm": lambda: self.move_syringe_mm(1),
-            "Hoch 5 mm": lambda: self.move_syringe_mm(5),
-            "Hoch 10 mm": lambda: self.move_syringe_mm(10),
-            "Runter 1 mm": lambda: self.move_syringe_mm(-1),
-            "Runter 5 mm": lambda: self.move_syringe_mm(-5),
-            "Runter 10 mm": lambda: self.move_syringe_mm(-10),
-        }
-
-        handler = action_map.get(action_text)
-        if handler:
-            handler()
-
-        self.menu_spinner.text = "Aktion wählen"
 
     def _send_syringe_stepper_command(self, command):
         if moonraker.send_gcode(command):
@@ -1468,27 +1462,45 @@ class SyringeScreen(Screen):
         logging.error(f"Syringe command failed: {command}")
         return False
 
-    def home_syringe(self):
-        commands = [
-            "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
-            "MANUAL_STEPPER STEPPER=syringe MOVE=0 SPEED=5 STOP_ON_ENDSTOP=1",
-            "MANUAL_STEPPER STEPPER=syringe SET_POSITION=0"
-        ]
+    def _try_home_in_direction(self, distance_mm):
+        command = (
+            f"MANUAL_STEPPER STEPPER=syringe MOVE={distance_mm:.3f} "
+            f"SPEED={self.syringe_speed_mm_s:.3f} STOP_ON_ENDSTOP=1"
+        )
+        return moonraker.send_gcode(command)
 
-        for command in commands:
-            if not self._send_syringe_stepper_command(command):
+    def home_syringe(self):
+        if not self._send_syringe_stepper_command("MANUAL_STEPPER STEPPER=syringe ENABLE=1"):
+            return
+
+        forward_ok = self._try_home_in_direction(self.syringe_home_travel_mm)
+        if not forward_ok:
+            logging.warning("Syringe home forward failed, trying reverse direction")
+            reverse_ok = self._try_home_in_direction(-self.syringe_home_travel_mm)
+            if not reverse_ok:
+                self.status_label.text = "Home fehlgeschlagen: kein Endstop-Trigger"
+                logging.error("Syringe homing failed in both directions")
                 return
 
+        if not self._send_syringe_stepper_command("MANUAL_STEPPER STEPPER=syringe SET_POSITION=0"):
+            return
+
+        self.syringe_position_mm = 0.0
         self.status_label.text = "Spritze gehomed"
-        logging.info("Syringe homed via manual_stepper")
+        logging.info("Syringe homed via manual_stepper with directional fallback")
 
     def move_syringe_mm(self, distance_mm):
         distance = float(distance_mm)
-        command = f"MANUAL_STEPPER STEPPER=syringe MOVE={distance:.3f} SPEED=5"
+        target_position = self.syringe_position_mm + distance
+        command = (
+            f"MANUAL_STEPPER STEPPER=syringe MOVE={target_position:.3f} "
+            f"SPEED={self.syringe_speed_mm_s:.3f}"
+        )
         if self._send_syringe_stepper_command(command):
+            self.syringe_position_mm = target_position
             direction_text = "hoch" if distance > 0 else "runter"
             self.status_label.text = f"Spritze {direction_text}: {abs(distance):.0f} mm"
-            logging.info(f"Syringe moved {distance} mm")
+            logging.info(f"Syringe moved {distance} mm to target {target_position} mm")
 
 
 class FanCurveGraph(Widget):
