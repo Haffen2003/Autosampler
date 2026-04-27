@@ -1345,8 +1345,8 @@ class MotorPositionScreen(Screen):
 class SyringeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 0.20))
-        self.syringe_accel_mm_s2 = float(CONFIG.get('syringe_accel_mm_s2', 0.10))
+        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 0.05))
+        self.syringe_accel_mm_s2 = float(CONFIG.get('syringe_accel_mm_s2', 0.05))
         self.syringe_min_pos_mm = float(CONFIG.get('syringe_min_pos_mm', -200.0))
         self.syringe_max_pos_mm = float(CONFIG.get('syringe_max_pos_mm', 200.0))
         self.syringe_home_coarse_mm = float(CONFIG.get('syringe_home_coarse_mm', 100.0))
