@@ -1342,76 +1342,153 @@ class MotorPositionScreen(Screen):
         except IOError as e:
             logging.error(f"Error saving positions: {e}")
 
-class PumpScreen(Screen):
+class SyringeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        root = BoxLayout(orientation='horizontal', padding=[14, 14, 14, 14], spacing=14)
+        root = FloatLayout()
 
-        left_controls = BoxLayout(
+        content = BoxLayout(
             orientation='vertical',
-            size_hint=(None, 1),
-            width=220,
-            spacing=10
+            padding=[14, 14, 14, 14],
+            spacing=12,
+            size_hint=(1, 1)
         )
 
         title = Label(
-            text="Pumpe",
+            text="Spritze",
             size_hint_y=None,
             height=46,
             font_size=24,
             color=[1, 1, 1, 1]
         )
-        left_controls.add_widget(title)
+        content.add_widget(title)
 
-        pump_on_btn = Button(text="Ein", size_hint_y=None, height=66, font_size=22)
-        pump_off_btn = Button(text="Aus", size_hint_y=None, height=66, font_size=22)
-        pump_on_btn.bind(on_press=self.pump_on)
-        pump_off_btn.bind(on_press=self.pump_off)
-
-        left_controls.add_widget(pump_on_btn)
-        left_controls.add_widget(pump_off_btn)
-        left_controls.add_widget(Widget())
-
-        right_content = BoxLayout(orientation='vertical', padding=[12, 4, 12, 4], spacing=8)
-        right_content.add_widget(Label(
-            text="Steuerung über GCode:\nSET_PIN PIN=pumpe VALUE=1/0",
+        info_label = Label(
+            text="Stepper-Steuerung: MANUAL_STEPPER STEPPER=syringe",
+            size_hint_y=None,
+            height=36,
+            font_size=18,
             halign='left',
             valign='middle',
-            font_size=18,
             color=[0.9, 0.95, 1, 1]
-        ))
+        )
+        info_label.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
+        content.add_widget(info_label)
+
+        command_help = Label(
+            text="Aktionen oben rechts: Home sowie +/- 1, 5, 10 mm",
+            size_hint_y=None,
+            height=32,
+            font_size=16,
+            halign='left',
+            valign='middle',
+            color=[0.8, 0.88, 1, 1]
+        )
+        command_help.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
+        content.add_widget(command_help)
+
+        content.add_widget(Widget())
 
         self.status_label = Label(
-            text="",
+            text="Bereit",
             size_hint_y=None,
             height=40,
             font_size=16,
-            color=[1, 1, 1, 0.95]
+            color=[1, 1, 1, 0.95],
+            halign='left',
+            valign='middle'
         )
-        right_content.add_widget(Widget())
-        right_content.add_widget(self.status_label)
+        self.status_label.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
+        content.add_widget(self.status_label)
 
-        root.add_widget(left_controls)
-        root.add_widget(right_content)
+        root.add_widget(content)
+
+        menu_panel = BoxLayout(
+            orientation='vertical',
+            size_hint=(None, None),
+            size=(220, 130),
+            spacing=8,
+            pos_hint={'right': 0.985, 'top': 0.985}
+        )
+
+        menu_title = Label(
+            text="Spritzen-Menü",
+            size_hint=(1, None),
+            height=26,
+            font_size=14,
+            color=[0.8, 0.9, 1, 1]
+        )
+        menu_panel.add_widget(menu_title)
+
+        self.menu_spinner = Spinner(
+            text="Aktion wählen",
+            values=(
+                "Home",
+                "Hoch 1 mm",
+                "Hoch 5 mm",
+                "Hoch 10 mm",
+                "Runter 1 mm",
+                "Runter 5 mm",
+                "Runter 10 mm"
+            ),
+            size_hint=(1, None),
+            height=46,
+            font_size=16
+        )
+        self.menu_spinner.bind(text=self.on_menu_action)
+        menu_panel.add_widget(self.menu_spinner)
+
+        root.add_widget(menu_panel)
         self.add_widget(root)
 
-    def pump_on(self, _instance):
-        command = "SET_PIN PIN=pumpe VALUE=1"
-        if moonraker.send_gcode(command):
-            self.status_label.text = "Pumpe eingeschaltet"
-            logging.info("Pump enabled via SET_PIN")
-        else:
-            self.status_label.text = "Fehler: Pumpe konnte nicht eingeschaltet werden"
-            logging.error("Failed to enable pump")
+    def on_menu_action(self, _spinner, action_text):
+        if action_text == "Aktion wählen":
+            return
 
-    def pump_off(self, _instance):
-        command = "SET_PIN PIN=pumpe VALUE=0"
+        action_map = {
+            "Home": self.home_syringe,
+            "Hoch 1 mm": lambda: self.move_syringe_mm(1),
+            "Hoch 5 mm": lambda: self.move_syringe_mm(5),
+            "Hoch 10 mm": lambda: self.move_syringe_mm(10),
+            "Runter 1 mm": lambda: self.move_syringe_mm(-1),
+            "Runter 5 mm": lambda: self.move_syringe_mm(-5),
+            "Runter 10 mm": lambda: self.move_syringe_mm(-10),
+        }
+
+        handler = action_map.get(action_text)
+        if handler:
+            handler()
+
+        self.menu_spinner.text = "Aktion wählen"
+
+    def _send_syringe_stepper_command(self, command):
         if moonraker.send_gcode(command):
-            self.status_label.text = "Pumpe ausgeschaltet"
-            logging.info("Pump disabled via SET_PIN")
-        else:
-            self.status_label.text = "Fehler: Pumpe konnte nicht ausgeschaltet werden"
-            logging.error("Failed to disable pump")
+            return True
+        self.status_label.text = "Fehler: Spritzenbefehl fehlgeschlagen"
+        logging.error(f"Syringe command failed: {command}")
+        return False
+
+    def home_syringe(self):
+        commands = [
+            "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
+            "MANUAL_STEPPER STEPPER=syringe MOVE=0 SPEED=5 STOP_ON_ENDSTOP=1",
+            "MANUAL_STEPPER STEPPER=syringe SET_POSITION=0"
+        ]
+
+        for command in commands:
+            if not self._send_syringe_stepper_command(command):
+                return
+
+        self.status_label.text = "Spritze gehomed"
+        logging.info("Syringe homed via manual_stepper")
+
+    def move_syringe_mm(self, distance_mm):
+        distance = float(distance_mm)
+        command = f"MANUAL_STEPPER STEPPER=syringe MOVE={distance:.3f} SPEED=5"
+        if self._send_syringe_stepper_command(command):
+            direction_text = "hoch" if distance > 0 else "runter"
+            self.status_label.text = f"Spritze {direction_text}: {abs(distance):.0f} mm"
+            logging.info(f"Syringe moved {distance} mm")
 
 
 class FanCurveGraph(Widget):
@@ -1911,20 +1988,20 @@ class MainScreen(BoxLayout):
         luefter_box.add_widget(luefter_lbl)
         self.sidebar.add_widget(luefter_box)
 
-        # Pump-Screen Button
-        pump_btn = Button(
+        # Syringe-Screen Button
+        syringe_btn = Button(
             size_hint=(None, None),
             size=(64, 64),
-            background_normal=icon('pump.64.png'),
-            background_down=icon('pump.64.png'),
+            background_normal=icon('syringe.64.png'),
+            background_down=icon('syringe.64.png'),
             pos_hint={'center_x': 0.5},
-            on_press=lambda x: self.switch_screen("pump")
+            on_press=lambda x: self.switch_screen("syringe")
         )
-        pump_lbl = Label(text="Pump", size_hint_y=None, height=30)
-        pump_box = BoxLayout(orientation='vertical', size_hint_y=None, height=94)
-        pump_box.add_widget(pump_btn)
-        pump_box.add_widget(pump_lbl)
-        self.sidebar.add_widget(pump_box)
+        syringe_lbl = Label(text="Spritze", size_hint_y=None, height=30)
+        syringe_box = BoxLayout(orientation='vertical', size_hint_y=None, height=94)
+        syringe_box.add_widget(syringe_btn)
+        syringe_box.add_widget(syringe_lbl)
+        self.sidebar.add_widget(syringe_box)
 
         if ENABLE_COCKTAIL_SCREEN:
             # Cocktail-Screen Button
@@ -1978,7 +2055,7 @@ class MainScreen(BoxLayout):
         self.screen_manager.add_widget(PreparationScreen(name="prep"))
         self.screen_manager.add_widget(MotorPositionScreen(name="motor"))
         self.screen_manager.add_widget(LuefterScreen(name="luefter"))
-        self.screen_manager.add_widget(PumpScreen(name="pump"))
+        self.screen_manager.add_widget(SyringeScreen(name="syringe"))
         self.screen_manager.add_widget(HomeScreen(name="home"))
         self.screen_manager.add_widget(GCodeScreen(name="gcode"))
 
