@@ -1349,7 +1349,7 @@ class SyringeScreen(Screen):
         self.syringe_accel_mm_s2 = float(CONFIG.get('syringe_accel_mm_s2', 2.0))
         self.syringe_min_pos_mm = float(CONFIG.get('syringe_min_pos_mm', -200.0))
         self.syringe_max_pos_mm = float(CONFIG.get('syringe_max_pos_mm', 200.0))
-        self.syringe_home_coarse_mm = float(CONFIG.get('syringe_home_coarse_mm', 200.0))
+        self.syringe_home_coarse_mm = float(CONFIG.get('syringe_home_coarse_mm', 170.0))
         self.syringe_home_backoff_mm = float(CONFIG.get('syringe_home_backoff_mm', 2.0))
         self.syringe_home_fine_mm = float(CONFIG.get('syringe_home_fine_mm', 5.0))
         self.syringe_home_two_stage = bool(CONFIG.get('syringe_home_two_stage', True))
