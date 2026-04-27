@@ -1345,196 +1345,53 @@ class MotorPositionScreen(Screen):
 class SyringeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 0.8))
-        self.syringe_min_pos_mm = float(CONFIG.get('syringe_min_pos_mm', 0.0))
-        self.syringe_max_pos_mm = float(CONFIG.get('syringe_max_pos_mm', 100.0))
-        self.syringe_home_seek_mm = float(CONFIG.get('syringe_home_seek_mm', 80.0))
-        self.syringe_home_direction = str(CONFIG.get('syringe_home_direction', 'min')).lower()
-        self.syringe_position_mm = float(CONFIG.get('syringe_start_pos_mm', self.syringe_min_pos_mm))
 
-        root = FloatLayout()
+        root = BoxLayout(orientation='vertical', padding=[20, 20, 20, 20], spacing=16)
 
-        content = BoxLayout(
-            orientation='vertical',
-            padding=[14, 14, 14, 14],
-            spacing=12,
-            size_hint=(1, 1)
-        )
-
-        title = Label(
+        root.add_widget(Label(
             text="Spritze",
             size_hint_y=None,
             height=46,
             font_size=24,
             color=[1, 1, 1, 1]
-        )
-        content.add_widget(title)
+        ))
 
-        info_label = Label(
-            text="Stepper-Steuerung: MANUAL_STEPPER STEPPER=syringe",
-            size_hint_y=None,
-            height=36,
-            font_size=18,
-            halign='left',
-            valign='middle',
-            color=[0.9, 0.95, 1, 1]
-        )
-        info_label.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
-        content.add_widget(info_label)
-
-        command_help = Label(
-            text="Aktionen oben rechts: Home sowie +/- 1, 5, 10 mm",
-            size_hint_y=None,
-            height=32,
-            font_size=16,
-            halign='left',
-            valign='middle',
-            color=[0.8, 0.88, 1, 1]
-        )
-        command_help.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
-        content.add_widget(command_help)
-
-        content.add_widget(Widget())
-
-        self.status_label = Label(
-            text="Bereit",
-            size_hint_y=None,
-            height=40,
-            font_size=16,
-            color=[1, 1, 1, 0.95],
-            halign='left',
-            valign='middle'
-        )
-        self.status_label.bind(size=lambda instance, value: setattr(instance, 'text_size', value))
-        content.add_widget(self.status_label)
-
-        root.add_widget(content)
-
-        menu_panel = BoxLayout(
-            orientation='vertical',
+        taster_btn = Button(
+            text="Taster",
             size_hint=(None, None),
-            size=(280, 210),
-            spacing=8,
-            pos_hint={'right': 0.985, 'top': 0.985}
+            size=(200, 66),
+            font_size=22
         )
+        taster_btn.bind(on_press=self.query_endstops)
 
-        menu_title = Label(
-            text="Spritzen-Menü",
-            size_hint=(1, None),
-            height=26,
-            font_size=14,
-            color=[0.8, 0.9, 1, 1]
+        btn_anchor = AnchorLayout(anchor_x='left', anchor_y='top', size_hint=(1, None), height=80)
+        btn_anchor.add_widget(taster_btn)
+        root.add_widget(btn_anchor)
+
+        self.result_label = Label(
+            text="",
+            size_hint=(1, 1),
+            font_size=16,
+            color=[0.9, 1, 0.9, 1],
+            halign='left',
+            valign='top'
         )
-        menu_panel.add_widget(menu_title)
+        self.result_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(self.result_label)
 
-        home_btn = Button(text="Home", size_hint=(1, None), height=46, font_size=18)
-        home_btn.bind(on_press=lambda _btn: self.home_syringe())
-        menu_panel.add_widget(home_btn)
-
-        up_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=54, spacing=8)
-        up_1_btn = Button(text="+1 mm", font_size=16)
-        up_5_btn = Button(text="+5 mm", font_size=16)
-        up_10_btn = Button(text="+10 mm", font_size=16)
-        up_1_btn.bind(on_press=lambda _btn: self.move_syringe_mm(1))
-        up_5_btn.bind(on_press=lambda _btn: self.move_syringe_mm(5))
-        up_10_btn.bind(on_press=lambda _btn: self.move_syringe_mm(10))
-        up_row.add_widget(up_1_btn)
-        up_row.add_widget(up_5_btn)
-        up_row.add_widget(up_10_btn)
-        menu_panel.add_widget(up_row)
-
-        down_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=54, spacing=8)
-        down_1_btn = Button(text="-1 mm", font_size=16)
-        down_5_btn = Button(text="-5 mm", font_size=16)
-        down_10_btn = Button(text="-10 mm", font_size=16)
-        down_1_btn.bind(on_press=lambda _btn: self.move_syringe_mm(-1))
-        down_5_btn.bind(on_press=lambda _btn: self.move_syringe_mm(-5))
-        down_10_btn.bind(on_press=lambda _btn: self.move_syringe_mm(-10))
-        down_row.add_widget(down_1_btn)
-        down_row.add_widget(down_5_btn)
-        down_row.add_widget(down_10_btn)
-        menu_panel.add_widget(down_row)
-
-        root.add_widget(menu_panel)
         self.add_widget(root)
 
-    def _send_syringe_stepper_command(self, command):
-        if moonraker.send_gcode(command):
-            return True
-        self.status_label.text = "Fehler: Spritzenbefehl fehlgeschlagen"
-        logging.error(f"Syringe command failed: {command}")
-        return False
-
-    def _clamp_syringe_target(self, target_mm):
-        return max(self.syringe_min_pos_mm, min(float(target_mm), self.syringe_max_pos_mm))
-
-    def _try_home_target(self, target_mm):
-        clamped_target = self._clamp_syringe_target(target_mm)
-        command = (
-            f"MANUAL_STEPPER STEPPER=syringe MOVE={clamped_target:.3f} "
-            f"SPEED={self.syringe_speed_mm_s:.3f} STOP_ON_ENDSTOP=1"
-        )
-        return moonraker.send_gcode(command)
-
-    def home_syringe(self):
-        if not self._send_syringe_stepper_command("MANUAL_STEPPER STEPPER=syringe ENABLE=1"):
+    def query_endstops(self, _instance):
+        self.result_label.text = "Abfrage läuft…"
+        if not moonraker.send_gcode("QUERY_ENDSTOPS"):
+            self.result_label.text = "Fehler: QUERY_ENDSTOPS fehlgeschlagen"
+            logging.error("QUERY_ENDSTOPS failed")
             return
 
-        midpoint = (self.syringe_min_pos_mm + self.syringe_max_pos_mm) / 2.0
-        if not self._send_syringe_stepper_command(
-            f"MANUAL_STEPPER STEPPER=syringe SET_POSITION={midpoint:.3f}"
-        ):
-            return
-        self.syringe_position_mm = midpoint
-
-        seek_distance = abs(self.syringe_home_seek_mm)
-        primary_to_min = self.syringe_home_direction != 'max'
-
-        if primary_to_min:
-            primary_target = midpoint - seek_distance
-            fallback_target = midpoint + seek_distance
-        else:
-            primary_target = midpoint + seek_distance
-            fallback_target = midpoint - seek_distance
-
-        primary_ok = self._try_home_target(primary_target)
-        if not primary_ok:
-            logging.warning("Syringe home primary direction failed, trying opposite direction")
-            fallback_ok = self._try_home_target(fallback_target)
-            if not fallback_ok:
-                self.status_label.text = "Home fehlgeschlagen: Endstop nicht erreicht"
-                logging.error("Syringe homing failed in both clamped directions")
-                return
-
-        if not self._send_syringe_stepper_command("MANUAL_STEPPER STEPPER=syringe SET_POSITION=0"):
-            return
-
-        self.syringe_position_mm = 0.0
-        self.status_label.text = "Spritze gehomed"
-        logging.info("Syringe homed via manual_stepper with clamped seek")
-
-    def move_syringe_mm(self, distance_mm):
-        if not self._send_syringe_stepper_command("MANUAL_STEPPER STEPPER=syringe ENABLE=1"):
-            return
-
-        distance = float(distance_mm)
-        raw_target = self.syringe_position_mm + distance
-        target_position = self._clamp_syringe_target(raw_target)
-
-        if abs(target_position - self.syringe_position_mm) < 1e-6:
-            self.status_label.text = "Grenze erreicht: keine weitere Bewegung möglich"
-            return
-
-        command = (
-            f"MANUAL_STEPPER STEPPER=syringe MOVE={target_position:.3f} "
-            f"SPEED={self.syringe_speed_mm_s:.3f}"
-        )
-        if self._send_syringe_stepper_command(command):
-            moved_distance = target_position - self.syringe_position_mm
-            self.syringe_position_mm = target_position
-            direction_text = "hoch" if moved_distance > 0 else "runter"
-            self.status_label.text = f"Spritze {direction_text}: {abs(moved_distance):.1f} mm"
-            logging.info(f"Syringe moved {moved_distance} mm to target {target_position} mm")
+        lines = moonraker.get_console_lines(count=20)
+        relevant = [l for l in lines if 'endstop' in l.lower() or 'QUERY' in l]
+        self.result_label.text = "\n".join(relevant) if relevant else "\n".join(lines[-10:])
+        logging.info("QUERY_ENDSTOPS result displayed")
 
 
 class FanCurveGraph(Widget):
