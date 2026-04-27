@@ -5,14 +5,14 @@
   "touch_rotation": 180,
   "z_safety_enabled": true,
   "z_move_speed_mm_min": 1200.0,
-  "syringe_speed_mm_s": 0.75,
-  "syringe_accel_mm_s2": 0.75,
+  "syringe_speed_mm_s": 5.0,
+  "syringe_accel_mm_s2": 2.0,
   "syringe_min_pos_mm": -200.0,
   "syringe_max_pos_mm": 200.0,
   "syringe_home_coarse_mm": 100.0,
   "syringe_home_backoff_mm": 2.0,
   "syringe_home_fine_mm": 5.0,
   "syringe_home_two_stage": true,
-  "syringe_home_direction": "min",
+  "syringe_home_direction": "max",
   "syringe_start_pos_mm": 0.0
 }

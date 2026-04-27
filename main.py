@@ -1345,15 +1345,15 @@ class MotorPositionScreen(Screen):
 class SyringeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 0.75))
-        self.syringe_accel_mm_s2 = float(CONFIG.get('syringe_accel_mm_s2', 0.75))
+        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 5.0))
+        self.syringe_accel_mm_s2 = float(CONFIG.get('syringe_accel_mm_s2', 2.0))
         self.syringe_min_pos_mm = float(CONFIG.get('syringe_min_pos_mm', -200.0))
         self.syringe_max_pos_mm = float(CONFIG.get('syringe_max_pos_mm', 200.0))
         self.syringe_home_coarse_mm = float(CONFIG.get('syringe_home_coarse_mm', 100.0))
         self.syringe_home_backoff_mm = float(CONFIG.get('syringe_home_backoff_mm', 2.0))
         self.syringe_home_fine_mm = float(CONFIG.get('syringe_home_fine_mm', 5.0))
         self.syringe_home_two_stage = bool(CONFIG.get('syringe_home_two_stage', True))
-        self.syringe_home_direction = str(CONFIG.get('syringe_home_direction', 'min')).lower()
+        self.syringe_home_direction = str(CONFIG.get('syringe_home_direction', 'max')).lower()
         self.syringe_position_mm = float(CONFIG.get('syringe_start_pos_mm', 0.0))
 
         root = BoxLayout(orientation='vertical', padding=[20, 20, 20, 20], spacing=16)
@@ -1410,15 +1410,15 @@ class SyringeScreen(Screen):
         root.add_widget(backward_row)
 
         diag_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=72, spacing=12)
-        taster_btn = Button(text="Taster", font_size=20)
+        reference_btn = Button(text="Referenzieren", font_size=20)
         enable_btn = Button(text="Enable", font_size=20)
         dump_tmc_btn = Button(text="Dump TMC", font_size=20)
 
-        taster_btn.bind(on_press=self.query_endstops)
+        reference_btn.bind(on_press=self.reference_syringe)
         enable_btn.bind(on_press=self.enable_syringe_stepper)
         dump_tmc_btn.bind(on_press=self.dump_tmc_syringe)
 
-        diag_row.add_widget(taster_btn)
+        diag_row.add_widget(reference_btn)
         diag_row.add_widget(enable_btn)
         diag_row.add_widget(dump_tmc_btn)
         root.add_widget(diag_row)
@@ -1443,6 +1443,20 @@ class SyringeScreen(Screen):
     def _home_search_sign(self):
         return 1.0 if self.syringe_home_direction == 'max' else -1.0
 
+    def _move_to_position(self, target_position, error_message):
+        clamped_target = self._clamp_syringe_target(target_position)
+        if not self._send_syringe_command(
+            (
+                f"MANUAL_STEPPER STEPPER=syringe MOVE={clamped_target:.3f} "
+                f"SPEED={self.syringe_speed_mm_s:.3f} ACCEL={self.syringe_accel_mm_s2:.3f}"
+            ),
+            error_message
+        ):
+            return False
+
+        self.syringe_position_mm = clamped_target
+        return True
+
     def _run_home_move(self, target_mm, error_message):
         return self._send_syringe_command(
             (
@@ -1457,26 +1471,26 @@ class SyringeScreen(Screen):
             "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
             "Fehler: Spritze konnte nicht aktiviert werden"
         ):
-            return
+            return False
 
         if not self._send_syringe_command(
             "MANUAL_STEPPER STEPPER=syringe SET_POSITION=0",
             "Fehler: Spritzenposition konnte nicht gesetzt werden"
         ):
-            return
+            return False
 
         self.syringe_position_mm = 0.0
         home_sign = self._home_search_sign()
         coarse_target = self._clamp_syringe_target(home_sign * abs(self.syringe_home_coarse_mm))
 
         if not self._run_home_move(coarse_target, "Fehler: Grob-Home fehlgeschlagen"):
-            return
+            return False
 
         if not self._send_syringe_command(
             "MANUAL_STEPPER STEPPER=syringe SET_POSITION=0",
             "Fehler: Home-Position konnte nicht gesetzt werden"
         ):
-            return
+            return False
 
         if self.syringe_home_two_stage:
             backoff_target = self._clamp_syringe_target(-home_sign * abs(self.syringe_home_backoff_mm))
@@ -1487,27 +1501,41 @@ class SyringeScreen(Screen):
                 ),
                 "Fehler: Home-Backoff fehlgeschlagen"
             ):
-                return
+                return False
 
             if not self._send_syringe_command(
                 "MANUAL_STEPPER STEPPER=syringe SET_POSITION=0",
                 "Fehler: Backoff-Position konnte nicht gesetzt werden"
             ):
-                return
+                return False
 
             fine_target = self._clamp_syringe_target(home_sign * abs(self.syringe_home_fine_mm))
             if not self._run_home_move(fine_target, "Fehler: Fein-Home fehlgeschlagen"):
-                return
+                return False
 
             if not self._send_syringe_command(
                 "MANUAL_STEPPER STEPPER=syringe SET_POSITION=0",
                 "Fehler: Fein-Home-Position konnte nicht gesetzt werden"
             ):
-                return
+                return False
 
         self.syringe_position_mm = 0.0
         self._log_syringe_status("Spritze gehomed (Grob + Fein)" if self.syringe_home_two_stage else "Spritze gehomed")
         logging.info("Syringe homed with manual_stepper coarse/fine sequence")
+        return True
+
+    def reference_syringe(self, _instance):
+        if not self.home_syringe(_instance):
+            return
+
+        max_draw_target = self.syringe_max_pos_mm if self.syringe_home_direction == 'min' else self.syringe_min_pos_mm
+        if not self._move_to_position(max_draw_target, "Fehler: Max-Aufziehen fehlgeschlagen"):
+            return
+
+        if not self._move_to_position(0.0, "Fehler: Rückfahrt zu 0 fehlgeschlagen"):
+            return
+
+        self._log_syringe_status("Referenzieren fertig: Home -> Max aufziehen -> 0")
 
     def move_syringe_mm(self, distance_mm):
         if not self._send_syringe_command(
