@@ -1345,7 +1345,8 @@ class MotorPositionScreen(Screen):
 class SyringeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 0.8))
+        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 0.35))
+        self.syringe_accel_mm_s2 = float(CONFIG.get('syringe_accel_mm_s2', 0.25))
         self.syringe_min_pos_mm = float(CONFIG.get('syringe_min_pos_mm', 0.0))
         self.syringe_max_pos_mm = float(CONFIG.get('syringe_max_pos_mm', 100.0))
         self.syringe_home_seek_mm = float(CONFIG.get('syringe_home_seek_mm', 80.0))
@@ -1361,6 +1362,18 @@ class SyringeScreen(Screen):
             font_size=24,
             color=[1, 1, 1, 1]
         ))
+
+        motion_info = Label(
+            text=f"Langsamfahrt TR8x2: {self.syringe_speed_mm_s:.2f} mm/s | Ramp: {self.syringe_accel_mm_s2:.2f} mm/s²",
+            size_hint_y=None,
+            height=28,
+            font_size=15,
+            color=[0.82, 0.9, 1, 1],
+            halign='left',
+            valign='middle'
+        )
+        motion_info.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(motion_info)
 
         home_anchor = AnchorLayout(anchor_x='left', anchor_y='top', size_hint=(1, None), height=80)
         home_btn = Button(
@@ -1446,7 +1459,10 @@ class SyringeScreen(Screen):
             target = self._clamp_syringe_target(midpoint - seek_distance)
 
         if not self._send_syringe_command(
-            f"MANUAL_STEPPER STEPPER=syringe MOVE={target:.3f} SPEED={self.syringe_speed_mm_s:.3f} STOP_ON_ENDSTOP=1",
+            (
+                f"MANUAL_STEPPER STEPPER=syringe MOVE={target:.3f} "
+                f"SPEED={self.syringe_speed_mm_s:.3f} ACCEL={self.syringe_accel_mm_s2:.3f} STOP_ON_ENDSTOP=1"
+            ),
             "Fehler: Home fehlgeschlagen"
         ):
             return
@@ -1474,7 +1490,10 @@ class SyringeScreen(Screen):
             return
 
         if not self._send_syringe_command(
-            f"MANUAL_STEPPER STEPPER=syringe MOVE={target_position:.3f} SPEED={self.syringe_speed_mm_s:.3f}",
+            (
+                f"MANUAL_STEPPER STEPPER=syringe MOVE={target_position:.3f} "
+                f"SPEED={self.syringe_speed_mm_s:.3f} ACCEL={self.syringe_accel_mm_s2:.3f}"
+            ),
             "Fehler: Spritze konnte nicht bewegt werden"
         ):
             return
