@@ -1345,8 +1345,8 @@ class MotorPositionScreen(Screen):
 class SyringeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 0.25))
-        self.syringe_accel_mm_s2 = float(CONFIG.get('syringe_accel_mm_s2', 0.25))
+        self.syringe_speed_mm_s = float(CONFIG.get('syringe_speed_mm_s', 0.75))
+        self.syringe_accel_mm_s2 = float(CONFIG.get('syringe_accel_mm_s2', 0.75))
         self.syringe_min_pos_mm = float(CONFIG.get('syringe_min_pos_mm', -200.0))
         self.syringe_max_pos_mm = float(CONFIG.get('syringe_max_pos_mm', 200.0))
         self.syringe_home_coarse_mm = float(CONFIG.get('syringe_home_coarse_mm', 100.0))
@@ -1423,23 +1423,17 @@ class SyringeScreen(Screen):
         diag_row.add_widget(dump_tmc_btn)
         root.add_widget(diag_row)
 
-        self.result_label = Label(
-            text="",
-            size_hint=(1, 1),
-            font_size=16,
-            color=[0.9, 1, 0.9, 1],
-            halign='left',
-            valign='top'
-        )
-        self.result_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
-        root.add_widget(self.result_label)
+        root.add_widget(Widget())
 
         self.add_widget(root)
+
+    def _log_syringe_status(self, message):
+        logging.info(f"Syringe status: {message}")
 
     def _send_syringe_command(self, command, error_message):
         if moonraker.send_gcode(command):
             return True
-        self.result_label.text = error_message
+        self._log_syringe_status(error_message)
         logging.error(f"Syringe command failed: {command}")
         return False
 
@@ -1512,7 +1506,7 @@ class SyringeScreen(Screen):
                 return
 
         self.syringe_position_mm = 0.0
-        self.result_label.text = "Spritze gehomed (Grob + Fein)" if self.syringe_home_two_stage else "Spritze gehomed"
+        self._log_syringe_status("Spritze gehomed (Grob + Fein)" if self.syringe_home_two_stage else "Spritze gehomed")
         logging.info("Syringe homed with manual_stepper coarse/fine sequence")
 
     def move_syringe_mm(self, distance_mm):
@@ -1524,7 +1518,7 @@ class SyringeScreen(Screen):
 
         target_position = self._clamp_syringe_target(self.syringe_position_mm + float(distance_mm))
         if abs(target_position - self.syringe_position_mm) < 1e-6:
-            self.result_label.text = "Grenze erreicht: keine weitere Bewegung möglich"
+            self._log_syringe_status("Grenze erreicht: keine weitere Bewegung möglich")
             return
 
         if not self._send_syringe_command(
@@ -1539,19 +1533,20 @@ class SyringeScreen(Screen):
         moved_distance = target_position - self.syringe_position_mm
         self.syringe_position_mm = target_position
         direction_text = "vor" if moved_distance > 0 else "zurück"
-        self.result_label.text = f"Spritze {direction_text}: {abs(moved_distance):.1f} mm"
+        self._log_syringe_status(f"Spritze {direction_text}: {abs(moved_distance):.1f} mm")
         logging.info(f"Syringe moved {moved_distance} mm to target {target_position} mm")
 
     def query_endstops(self, _instance):
-        self.result_label.text = "Abfrage läuft…"
+        self._log_syringe_status("Abfrage läuft")
         if not moonraker.send_gcode("QUERY_ENDSTOPS"):
-            self.result_label.text = "Fehler: QUERY_ENDSTOPS fehlgeschlagen"
+            self._log_syringe_status("Fehler: QUERY_ENDSTOPS fehlgeschlagen")
             logging.error("QUERY_ENDSTOPS failed")
             return
 
         lines = moonraker.get_console_lines(count=20)
         relevant = [l for l in lines if 'endstop' in l.lower() or 'QUERY' in l]
-        self.result_label.text = "\n".join(relevant) if relevant else "\n".join(lines[-10:])
+        display_text = " | ".join(relevant) if relevant else " | ".join(lines[-10:])
+        self._log_syringe_status(display_text)
         logging.info("QUERY_ENDSTOPS result displayed")
 
     def enable_syringe_stepper(self, _instance):
@@ -1559,11 +1554,11 @@ class SyringeScreen(Screen):
             "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
             "Fehler: ENABLE fehlgeschlagen"
         ):
-            self.result_label.text = "Spritze aktiviert (ENABLE=1)"
+            self._log_syringe_status("Spritze aktiviert (ENABLE=1)")
             logging.info("Syringe stepper enabled")
 
     def dump_tmc_syringe(self, _instance):
-        self.result_label.text = "DUMP_TMC läuft…"
+        self._log_syringe_status("DUMP_TMC läuft")
         if not self._send_syringe_command(
             "DUMP_TMC STEPPER=syringe",
             "Fehler: DUMP_TMC fehlgeschlagen"
@@ -1575,7 +1570,8 @@ class SyringeScreen(Screen):
             line for line in lines
             if 'tmc' in line.lower() or 'driver' in line.lower() or 'syringe' in line.lower()
         ]
-        self.result_label.text = "\n".join(relevant[-12:]) if relevant else "DUMP_TMC gesendet"
+        display_text = " | ".join(relevant[-12:]) if relevant else "DUMP_TMC gesendet"
+        self._log_syringe_status(display_text)
         logging.info("DUMP_TMC result displayed")
 
 
