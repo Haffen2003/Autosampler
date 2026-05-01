@@ -16,5 +16,8 @@
   "syringe_home_direction": "max",
   "syringe_start_pos_mm": 0.0,
   "syringe_timeout_buffer_s": 25.0,
-  "syringe_output_speed_factor": 0.5
+  "syringe_output_speed_factor": 0.5,
+  "z_zero_tolerance_mm": 0.15,
+  "z_settle_time_s": 1.0,
+  "z_wait_timeout_s": 180.0
 }

@@ -1410,6 +1410,9 @@ class SyringeCalibrationPopup(Popup):
         self.size_hint = (0.86, 0.9)
         self.auto_dismiss = False
         self.z_move_speed = float(CONFIG.get('z_move_speed_mm_min', 1200.0))
+        self.z_zero_tolerance_mm = float(CONFIG.get('z_zero_tolerance_mm', 0.15))
+        self.z_settle_time_s = float(CONFIG.get('z_settle_time_s', 1.0))
+        self.z_wait_timeout_s = float(CONFIG.get('z_wait_timeout_s', 180.0))
         self.travel_distances = (30.0, 80.0, 160.0)
         self.measure_inputs = {}
         self.output_buttons = {}
@@ -1507,12 +1510,39 @@ class SyringeCalibrationPopup(Popup):
             return False
         return self.syringe_screen._move_to_position(target, error_message)
 
+    def _wait_for_z_target(self, target_z=0.0, timeout_s=None, poll_interval_s=0.25):
+        deadline = time.monotonic() + (self.z_wait_timeout_s if timeout_s is None else float(timeout_s))
+        settle_since = None
+        target_value = float(target_z)
+
+        while time.monotonic() < deadline:
+            z_value = moonraker.get_current_z_position()
+            if z_value is None:
+                settle_since = None
+                time.sleep(poll_interval_s)
+                continue
+
+            if abs(float(z_value) - target_value) <= self.z_zero_tolerance_mm:
+                if settle_since is None:
+                    settle_since = time.monotonic()
+                elif time.monotonic() - settle_since >= self.z_settle_time_s:
+                    return True
+            else:
+                settle_since = None
+
+            time.sleep(poll_interval_s)
+
+        return False
+
     def _move_z_to_zero(self):
         if not self._send_gcode("G90", "Fehler: G90 konnte nicht gesetzt werden"):
             return False
         if not self._send_gcode(f"G1 F{self.z_move_speed:.0f}", "Fehler: Z-Geschwindigkeit konnte nicht gesetzt werden"):
             return False
-        if not self._send_gcode("G1 Z0", "Fehler: Z konnte nicht auf 0 fahren", timeout_s=25.0):
+        if not self._send_gcode("G1 Z0", "Fehler: Z konnte nicht auf 0 fahren", timeout_s=max(90.0, self.z_wait_timeout_s)):
+            return False
+        if not self._wait_for_z_target(target_z=0.0, timeout_s=self.z_wait_timeout_s):
+            self._set_status("Fehler: Z hat Position 0 nicht rechtzeitig erreicht")
             return False
         return True
 
