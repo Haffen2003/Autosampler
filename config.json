@@ -14,5 +14,7 @@
   "syringe_home_fine_mm": 5.0,
   "syringe_home_two_stage": true,
   "syringe_home_direction": "max",
-  "syringe_start_pos_mm": 0.0
+  "syringe_start_pos_mm": 0.0,
+  "syringe_timeout_buffer_s": 25.0,
+  "syringe_output_speed_factor": 0.5
 }

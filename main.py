@@ -1565,7 +1565,12 @@ class SyringeCalibrationPopup(Popup):
         self._set_status(f"Kalibration {int(travel_mm)} mm fertig. Jetzt Ausgabe drücken.")
 
     def run_output(self, travel_mm):
-        if not self.syringe_screen._move_to_position(0.0, "Fehler: Ausgabe fehlgeschlagen"):
+        if not self.syringe_screen._move_to_position(
+            0.0,
+            "Fehler: Ausgabe fehlgeschlagen",
+            speed_factor=self.syringe_screen.syringe_output_speed_factor,
+            timeout_extra_s=max(self.syringe_screen.syringe_timeout_buffer_s, 40.0)
+        ):
             self._set_status("Fehler: Ausgabe fehlgeschlagen")
             return
 
@@ -1633,6 +1638,8 @@ class SyringeScreen(Screen):
         self.syringe_home_two_stage = bool(CONFIG.get('syringe_home_two_stage', True))
         self.syringe_home_direction = str(CONFIG.get('syringe_home_direction', 'max')).lower()
         self.syringe_position_mm = float(CONFIG.get('syringe_start_pos_mm', 0.0))
+        self.syringe_timeout_buffer_s = float(CONFIG.get('syringe_timeout_buffer_s', 25.0))
+        self.syringe_output_speed_factor = float(CONFIG.get('syringe_output_speed_factor', 0.5))
         self.calibration_popup = None
 
         root = BoxLayout(orientation='vertical', padding=[20, 20, 20, 20], spacing=16)
@@ -1720,11 +1727,13 @@ class SyringeScreen(Screen):
         logging.error(f"Syringe command failed: {command}")
         return False
 
-    def _estimate_syringe_move_timeout(self, start_pos_mm, target_pos_mm, extra_s=6.0):
+    def _estimate_syringe_move_timeout(self, start_pos_mm, target_pos_mm, speed_mm_s=None, extra_s=None):
         distance_mm = abs(float(target_pos_mm) - float(start_pos_mm))
-        speed_mm_s = max(0.1, float(self.syringe_speed_mm_s))
-        move_time_s = distance_mm / speed_mm_s
-        return max(8.0, move_time_s + float(extra_s))
+        speed_value = self.syringe_speed_mm_s if speed_mm_s is None else float(speed_mm_s)
+        speed_value = max(0.1, speed_value)
+        buffer_s = self.syringe_timeout_buffer_s if extra_s is None else float(extra_s)
+        move_time_s = distance_mm / speed_value
+        return max(12.0, move_time_s + max(8.0, buffer_s))
 
     def _clamp_syringe_target(self, target_mm):
         return max(self.syringe_min_pos_mm, min(float(target_mm), self.syringe_max_pos_mm))
@@ -1738,15 +1747,21 @@ class SyringeScreen(Screen):
             error_message
         )
 
-    def _move_to_position(self, target_position, error_message):
+    def _move_to_position(self, target_position, error_message, speed_factor=1.0, timeout_extra_s=None):
         clamped_target = self._clamp_syringe_target(target_position)
-        timeout_s = self._estimate_syringe_move_timeout(self.syringe_position_mm, clamped_target)
+        effective_speed = max(0.1, self.syringe_speed_mm_s * max(0.05, float(speed_factor)))
+        timeout_s = self._estimate_syringe_move_timeout(
+            self.syringe_position_mm,
+            clamped_target,
+            speed_mm_s=effective_speed,
+            extra_s=timeout_extra_s
+        )
         if not self._sync_syringe_position("Fehler: Spritzenposition konnte nicht synchronisiert werden"):
             return False
         if not self._send_syringe_command(
             (
                 f"MANUAL_STEPPER STEPPER=syringe MOVE={clamped_target:.3f} "
-                f"SPEED={self.syringe_speed_mm_s:.3f} ACCEL={self.syringe_accel_mm_s2:.3f}"
+                f"SPEED={effective_speed:.3f} ACCEL={self.syringe_accel_mm_s2:.3f}"
             ),
             error_message,
             timeout_s=timeout_s
@@ -1757,7 +1772,12 @@ class SyringeScreen(Screen):
         return True
 
     def _run_home_move(self, target_mm, error_message):
-        timeout_s = self._estimate_syringe_move_timeout(self.syringe_position_mm, target_mm, extra_s=8.0)
+        timeout_s = self._estimate_syringe_move_timeout(
+            self.syringe_position_mm,
+            target_mm,
+            speed_mm_s=self.syringe_speed_mm_s,
+            extra_s=max(self.syringe_timeout_buffer_s, 30.0)
+        )
         return self._send_syringe_command(
             (
                 f"MANUAL_STEPPER STEPPER=syringe MOVE={target_mm:.3f} "
@@ -1853,7 +1873,12 @@ class SyringeScreen(Screen):
             self._log_syringe_status("Grenze erreicht: keine weitere Bewegung möglich")
             return
 
-        timeout_s = self._estimate_syringe_move_timeout(self.syringe_position_mm, target_position)
+        timeout_s = self._estimate_syringe_move_timeout(
+            self.syringe_position_mm,
+            target_position,
+            speed_mm_s=self.syringe_speed_mm_s,
+            extra_s=self.syringe_timeout_buffer_s
+        )
 
         if not self._send_syringe_command(
             (
