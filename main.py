@@ -1413,6 +1413,8 @@ class SyringeCalibrationPopup(Popup):
         self.z_zero_tolerance_mm = float(CONFIG.get('z_zero_tolerance_mm', 0.15))
         self.z_settle_time_s = float(CONFIG.get('z_settle_time_s', 1.0))
         self.z_wait_timeout_s = float(CONFIG.get('z_wait_timeout_s', 180.0))
+        self.calibration_dwell_s = float(CONFIG.get('calibration_dwell_s', 10.0))
+        self.calibration_final_draw_mm = float(CONFIG.get('calibration_final_draw_mm', 2.0))
         self.travel_distances = (30.0, 80.0, 160.0)
         self.measure_inputs = {}
         self.output_buttons = {}
@@ -1586,11 +1588,17 @@ class SyringeCalibrationPopup(Popup):
             self._set_status(f"Fehler: Aufziehen {int(travel_mm)} mm fehlgeschlagen")
             return
 
+        self._set_status(f"Warte {self.calibration_dwell_s:.0f}s nach Aufziehen {int(travel_mm)} mm...")
+        time.sleep(max(0.0, self.calibration_dwell_s))
+
         if not self._move_z_to_zero():
             return
 
-        if not self._draw_relative_mm(draw_sign * 5.0, "Fehler: Zusatz-Aufziehen 5 mm fehlgeschlagen"):
-            self._set_status("Fehler: Zusatz-Aufziehen 5 mm fehlgeschlagen")
+        if not self._draw_relative_mm(
+            draw_sign * self.calibration_final_draw_mm,
+            f"Fehler: Zusatz-Aufziehen {self.calibration_final_draw_mm:.1f} mm fehlgeschlagen"
+        ):
+            self._set_status(f"Fehler: Zusatz-Aufziehen {self.calibration_final_draw_mm:.1f} mm fehlgeschlagen")
             return
 
         for btn in self.output_buttons.values():

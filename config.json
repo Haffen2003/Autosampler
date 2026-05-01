@@ -19,5 +19,7 @@
   "syringe_output_speed_factor": 0.5,
   "z_zero_tolerance_mm": 0.15,
   "z_settle_time_s": 1.0,
-  "z_wait_timeout_s": 180.0
+  "z_wait_timeout_s": 180.0,
+  "calibration_dwell_s": 10.0,
+  "calibration_final_draw_mm": 2.0
 }
