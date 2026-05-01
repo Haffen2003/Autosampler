@@ -53,6 +53,64 @@ CONFIG = load_config()
 MOONRAKER_URL = CONFIG.get('moonraker_url', 'http://localhost:7125')
 TOUCH_ROTATION = int(CONFIG.get('touch_rotation', 180))
 ENABLE_COCKTAIL_SCREEN = bool(CONFIG.get('enable_cocktail_screen', False))
+CALIBRATION_FILE = "calibration.json"
+
+
+def default_syringe_calibration_data():
+    return {
+        'slope_ml_per_mm': None,
+        'mm_per_ml': None,
+        'points': {}
+    }
+
+
+def load_syringe_calibration_data():
+    if not os.path.exists(CALIBRATION_FILE):
+        return default_syringe_calibration_data()
+
+    try:
+        with open(CALIBRATION_FILE, 'r') as f:
+            raw_data = json.load(f)
+    except json.JSONDecodeError:
+        logging.error(f'Error decoding {CALIBRATION_FILE}, using defaults')
+        return default_syringe_calibration_data()
+    except Exception as e:
+        logging.error(f'Error loading calibration: {e}')
+        return default_syringe_calibration_data()
+
+    if not isinstance(raw_data, dict):
+        return default_syringe_calibration_data()
+
+    points_raw = raw_data.get('points', {})
+    points = points_raw if isinstance(points_raw, dict) else {}
+
+    slope = raw_data.get('slope_ml_per_mm')
+    mm_per_ml = raw_data.get('mm_per_ml')
+    slope = float(slope) if slope is not None else None
+    mm_per_ml = float(mm_per_ml) if mm_per_ml is not None else None
+
+    return {
+        'slope_ml_per_mm': slope,
+        'mm_per_ml': mm_per_ml,
+        'points': {
+            '30': points.get('30'),
+            '80': points.get('80'),
+            '160': points.get('160')
+        }
+    }
+
+
+def save_syringe_calibration_data(data):
+    try:
+        with open(CALIBRATION_FILE, 'w') as f:
+            json.dump(data, f, indent=4)
+        return True
+    except Exception as e:
+        logging.error(f'Error saving calibration: {e}')
+        return False
+
+# Global syringe calibration data. This is filled from the calibration popup.
+SYRINGE_CALIBRATION_DATA = load_syringe_calibration_data()
 
 # base directories for resources
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -185,6 +243,7 @@ from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.image import Image
 from kivy.uix.switch import Switch
+from kivy.uix.popup import Popup
 from kivy.properties import NumericProperty
 from kivy.clock import Clock
 from kivy.metrics import dp
@@ -1342,6 +1401,225 @@ class MotorPositionScreen(Screen):
         except IOError as e:
             logging.error(f"Error saving positions: {e}")
 
+
+class SyringeCalibrationPopup(Popup):
+    def __init__(self, syringe_screen, **kwargs):
+        super().__init__(**kwargs)
+        self.syringe_screen = syringe_screen
+        self.title = "Spritzen-Kalibration"
+        self.size_hint = (0.86, 0.9)
+        self.auto_dismiss = False
+        self.z_move_speed = float(CONFIG.get('z_move_speed_mm_min', 1200.0))
+        self.travel_distances = (30.0, 80.0, 160.0)
+        self.measure_inputs = {}
+        self.output_buttons = {}
+
+        root = BoxLayout(orientation='vertical', padding=[16, 16, 16, 16], spacing=10)
+        root.add_widget(Label(
+            text="Messwert (ml) über dem jeweiligen Kalibrations-Button eingeben.",
+            size_hint_y=None,
+            height=32,
+            font_size=16,
+            halign='left',
+            valign='middle'
+        ))
+
+        calibrations_row = BoxLayout(orientation='horizontal', size_hint=(1, 1), spacing=12)
+        for travel_mm in self.travel_distances:
+            col = BoxLayout(orientation='vertical', spacing=8)
+            measure_input = TextInput(
+                hint_text=f"Gemessen bei {int(travel_mm)} mm (ml)",
+                multiline=False,
+                input_filter='float',
+                size_hint_y=None,
+                height=48,
+                font_size=18
+            )
+            calib_btn = Button(text=f"{int(travel_mm)} mm", size_hint_y=None, height=58, font_size=20)
+            calib_btn.bind(on_press=lambda _btn, t=travel_mm: self.run_calibration(t))
+
+            output_btn = Button(text="Ausgabe", size_hint_y=None, height=54, font_size=18, disabled=True, opacity=0)
+            output_btn.bind(on_press=lambda _btn, t=travel_mm: self.run_output(t))
+
+            col.add_widget(measure_input)
+            col.add_widget(calib_btn)
+            col.add_widget(output_btn)
+            calibrations_row.add_widget(col)
+
+            self.measure_inputs[travel_mm] = measure_input
+            self.output_buttons[travel_mm] = output_btn
+
+        root.add_widget(calibrations_row)
+
+        self.status_label = Label(
+            text="Bereit",
+            size_hint_y=None,
+            height=34,
+            font_size=16,
+            color=[0.9, 0.95, 1, 1],
+            halign='left',
+            valign='middle'
+        )
+        self.status_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(self.status_label)
+
+        action_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=60, spacing=12)
+        self.calculate_btn = Button(text="Berechnen", font_size=20, disabled=True)
+        close_btn = Button(text="Schließen", font_size=20)
+        self.calculate_btn.bind(on_press=self.calculate_slope)
+        close_btn.bind(on_press=lambda _btn: self.dismiss())
+        action_row.add_widget(self.calculate_btn)
+        action_row.add_widget(close_btn)
+        root.add_widget(action_row)
+
+        self.content = root
+
+        for measure_input in self.measure_inputs.values():
+            measure_input.bind(text=lambda *_args: self._update_calculate_button_state())
+        self._update_calculate_button_state()
+
+    def _update_calculate_button_state(self):
+        all_filled = all(str(inp.text).strip() for inp in self.measure_inputs.values())
+        self.calculate_btn.disabled = not all_filled
+
+    def _set_status(self, message):
+        self.status_label.text = message
+        logging.info(f"Syringe calibration: {message}")
+
+    def _send_gcode(self, command, error_message, timeout_s=None):
+        if moonraker.send_gcode(command, timeout_s=timeout_s):
+            return True
+        self._set_status(error_message)
+        logging.error(f"Calibration command failed: {command}")
+        return False
+
+    def _parse_decimal(self, text):
+        normalized = str(text).strip().replace(',', '.')
+        if not normalized:
+            raise ValueError("empty")
+        return float(normalized)
+
+    def _draw_relative_mm(self, draw_distance_mm, error_message):
+        current = self.syringe_screen.syringe_position_mm
+        target = self.syringe_screen._clamp_syringe_target(current + float(draw_distance_mm))
+        if abs(target - current) < 1e-6:
+            self._set_status("Spritzenweg begrenzt: Grenze erreicht")
+            return False
+        return self.syringe_screen._move_to_position(target, error_message)
+
+    def _move_z_to_zero(self):
+        if not self._send_gcode("G90", "Fehler: G90 konnte nicht gesetzt werden"):
+            return False
+        if not self._send_gcode(f"G1 F{self.z_move_speed:.0f}", "Fehler: Z-Geschwindigkeit konnte nicht gesetzt werden"):
+            return False
+        if not self._send_gcode("G1 Z0", "Fehler: Z konnte nicht auf 0 fahren", timeout_s=25.0):
+            return False
+        return True
+
+    def _move_z_to_endstop(self):
+        if not self._send_gcode("G90", "Fehler: G90 konnte nicht gesetzt werden"):
+            return False
+        if not self._send_gcode("G28 Z", "Fehler: Z konnte nicht referenziert werden", timeout_s=45.0):
+            return False
+        return True
+
+    def run_calibration(self, travel_mm):
+        draw_sign = -self.syringe_screen._home_search_sign()
+        self._set_status(f"Kalibration {int(travel_mm)} mm startet...")
+
+        if not self.syringe_screen._send_syringe_command(
+            "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
+            "Fehler: Spritze konnte nicht aktiviert werden"
+        ):
+            self._set_status("Fehler: Spritze konnte nicht aktiviert werden")
+            return
+
+        if not self._move_z_to_zero():
+            return
+
+        if not self._draw_relative_mm(draw_sign * 10.0, "Fehler: 10 mm Vorzug fehlgeschlagen"):
+            self._set_status("Fehler: Vorzug fehlgeschlagen")
+            return
+
+        if not self._move_z_to_endstop():
+            return
+
+        if not self._draw_relative_mm(draw_sign * float(travel_mm), f"Fehler: Aufziehen {int(travel_mm)} mm fehlgeschlagen"):
+            self._set_status(f"Fehler: Aufziehen {int(travel_mm)} mm fehlgeschlagen")
+            return
+
+        if not self._move_z_to_zero():
+            return
+
+        if not self._draw_relative_mm(draw_sign * 5.0, "Fehler: Zusatz-Aufziehen 5 mm fehlgeschlagen"):
+            self._set_status("Fehler: Zusatz-Aufziehen 5 mm fehlgeschlagen")
+            return
+
+        for btn in self.output_buttons.values():
+            btn.disabled = True
+            btn.opacity = 0
+
+        active_output_btn = self.output_buttons[travel_mm]
+        active_output_btn.disabled = False
+        active_output_btn.opacity = 1
+        self._set_status(f"Kalibration {int(travel_mm)} mm fertig. Jetzt Ausgabe drücken.")
+
+    def run_output(self, travel_mm):
+        if not self.syringe_screen._move_to_position(0.0, "Fehler: Ausgabe fehlgeschlagen"):
+            self._set_status("Fehler: Ausgabe fehlgeschlagen")
+            return
+
+        btn = self.output_buttons[travel_mm]
+        btn.disabled = True
+        btn.opacity = 0
+        self._set_status(f"Ausgabe für {int(travel_mm)} mm abgeschlossen")
+
+    def calculate_slope(self, _instance):
+        measured_values = {}
+        for travel_mm in self.travel_distances:
+            raw_text = self.measure_inputs[travel_mm].text
+            try:
+                measured = self._parse_decimal(raw_text)
+            except ValueError:
+                self._set_status("Bitte alle drei Volumenwerte als Dezimalzahl eintragen")
+                return
+            if measured <= 0:
+                self._set_status("Volumenwerte müssen größer als 0 sein")
+                return
+            measured_values[travel_mm] = measured
+
+        numerator = sum(distance * measured_values[distance] for distance in self.travel_distances)
+        denominator = sum(distance * distance for distance in self.travel_distances)
+        if denominator <= 0:
+            self._set_status("Fehler bei Steigungsberechnung")
+            return
+
+        slope_ml_per_mm = numerator / denominator
+        if slope_ml_per_mm <= 0:
+            self._set_status("Ungültige Steigung berechnet")
+            return
+
+        global SYRINGE_CALIBRATION_DATA
+        SYRINGE_CALIBRATION_DATA = {
+            'slope_ml_per_mm': slope_ml_per_mm,
+            'mm_per_ml': 1.0 / slope_ml_per_mm,
+            'points': {
+                '30': measured_values[30.0],
+                '80': measured_values[80.0],
+                '160': measured_values[160.0]
+            }
+        }
+
+        if not save_syringe_calibration_data(SYRINGE_CALIBRATION_DATA):
+            self._set_status("Steigung berechnet, aber Speichern in calibration.json fehlgeschlagen")
+            return
+
+        self._set_status(
+            f"Steigung gespeichert (calibration.json): {slope_ml_per_mm:.6f} ml/mm | "
+            f"Umrechnung: {SYRINGE_CALIBRATION_DATA['mm_per_ml']:.6f} mm/ml"
+        )
+
+
 class SyringeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -1355,6 +1633,7 @@ class SyringeScreen(Screen):
         self.syringe_home_two_stage = bool(CONFIG.get('syringe_home_two_stage', True))
         self.syringe_home_direction = str(CONFIG.get('syringe_home_direction', 'max')).lower()
         self.syringe_position_mm = float(CONFIG.get('syringe_start_pos_mm', 0.0))
+        self.calibration_popup = None
 
         root = BoxLayout(orientation='vertical', padding=[20, 20, 20, 20], spacing=16)
 
@@ -1410,15 +1689,15 @@ class SyringeScreen(Screen):
         root.add_widget(backward_row)
 
         diag_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=72, spacing=12)
-        reference_btn = Button(text="Referenzieren", font_size=20)
+        calibration_btn = Button(text="Kalibration", font_size=20)
         enable_btn = Button(text="Enable", font_size=20)
         dump_tmc_btn = Button(text="Dump TMC", font_size=20)
 
-        reference_btn.bind(on_press=self.reference_syringe)
+        calibration_btn.bind(on_press=self.open_calibration_window)
         enable_btn.bind(on_press=self.enable_syringe_stepper)
         dump_tmc_btn.bind(on_press=self.dump_tmc_syringe)
 
-        diag_row.add_widget(reference_btn)
+        diag_row.add_widget(calibration_btn)
         diag_row.add_widget(enable_btn)
         diag_row.add_widget(dump_tmc_btn)
         root.add_widget(diag_row)
@@ -1426,6 +1705,10 @@ class SyringeScreen(Screen):
         root.add_widget(Widget())
 
         self.add_widget(root)
+
+    def open_calibration_window(self, _instance):
+        self.calibration_popup = SyringeCalibrationPopup(self)
+        self.calibration_popup.open()
 
     def _log_syringe_status(self, message):
         logging.info(f"Syringe status: {message}")
