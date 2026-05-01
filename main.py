@@ -1603,19 +1603,15 @@ class SyringeCalibrationPopup(Popup):
         self._set_status(f"Kalibration {int(travel_mm)} mm fertig. Jetzt Ausgabe drücken.")
 
     def run_output(self, travel_mm):
-        if not self.syringe_screen._move_to_position(
-            0.0,
-            "Fehler: Ausgabe fehlgeschlagen",
-            speed_factor=self.syringe_screen.syringe_output_speed_factor,
-            timeout_extra_s=max(self.syringe_screen.syringe_timeout_buffer_s, 40.0)
-        ):
-            self._set_status("Fehler: Ausgabe fehlgeschlagen")
+        # Fully empty by driving syringe to its configured endstop reference.
+        if not self.syringe_screen.home_syringe(None):
+            self._set_status("Fehler: Ausgabe fehlgeschlagen (Endschalter nicht erreicht)")
             return
 
         btn = self.output_buttons[travel_mm]
         btn.disabled = True
         btn.opacity = 0
-        self._set_status(f"Ausgabe für {int(travel_mm)} mm abgeschlossen")
+        self._set_status(f"Ausgabe für {int(travel_mm)} mm abgeschlossen (Spritze am Endschalter)")
 
     def calculate_slope(self, _instance):
         measured_values = {}
