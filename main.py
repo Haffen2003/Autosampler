@@ -1541,6 +1541,14 @@ class SyringeCalibrationPopup(Popup):
             return False
         if not self._send_gcode("G1 Z0", "Fehler: Z konnte nicht auf 0 fahren", timeout_s=max(90.0, self.z_wait_timeout_s)):
             return False
+
+        if not self._send_gcode(
+            "M400",
+            "Fehler: Z-Bewegung konnte nicht abgeschlossen werden",
+            timeout_s=max(90.0, self.z_wait_timeout_s)
+        ):
+            return False
+
         if not self._wait_for_z_target(target_z=0.0, timeout_s=self.z_wait_timeout_s):
             self._set_status("Fehler: Z hat Position 0 nicht rechtzeitig erreicht")
             return False
@@ -1751,7 +1759,11 @@ class SyringeScreen(Screen):
         logging.info(f"Syringe status: {message}")
 
     def _send_syringe_command(self, command, error_message, timeout_s=None):
-        if moonraker.send_gcode(command, timeout_s=timeout_s):
+        effective_timeout = timeout_s
+        if effective_timeout is None:
+            effective_timeout = max(12.0, float(self.syringe_timeout_buffer_s))
+
+        if moonraker.send_gcode(command, timeout_s=effective_timeout):
             return True
         self._log_syringe_status(error_message)
         logging.error(f"Syringe command failed: {command}")
@@ -1774,7 +1786,8 @@ class SyringeScreen(Screen):
     def _sync_syringe_position(self, error_message):
         return self._send_syringe_command(
             f"MANUAL_STEPPER STEPPER=syringe SET_POSITION={self.syringe_position_mm:.3f}",
-            error_message
+            error_message,
+            timeout_s=max(30.0, float(self.syringe_timeout_buffer_s) * 2.0)
         )
 
     def _move_to_position(self, target_position, error_message, speed_factor=1.0, timeout_extra_s=None):
