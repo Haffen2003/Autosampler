@@ -1443,8 +1443,16 @@ class SyringeScreen(Screen):
     def _home_search_sign(self):
         return 1.0 if self.syringe_home_direction == 'max' else -1.0
 
+    def _sync_syringe_position(self, error_message):
+        return self._send_syringe_command(
+            f"MANUAL_STEPPER STEPPER=syringe SET_POSITION={self.syringe_position_mm:.3f}",
+            error_message
+        )
+
     def _move_to_position(self, target_position, error_message):
         clamped_target = self._clamp_syringe_target(target_position)
+        if not self._sync_syringe_position("Fehler: Spritzenposition konnte nicht synchronisiert werden"):
+            return False
         if not self._send_syringe_command(
             (
                 f"MANUAL_STEPPER STEPPER=syringe MOVE={clamped_target:.3f} "
@@ -1542,6 +1550,9 @@ class SyringeScreen(Screen):
             "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
             "Fehler: Spritze konnte nicht aktiviert werden"
         ):
+            return
+
+        if not self._sync_syringe_position("Fehler: Spritzenposition konnte nicht synchronisiert werden"):
             return
 
         target_position = self._clamp_syringe_target(self.syringe_position_mm + float(distance_mm))
