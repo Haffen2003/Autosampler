@@ -135,6 +135,109 @@ def save_syringe_calibration_data(data):
 # Global syringe calibration data. This is filled from the calibration popup.
 SYRINGE_CALIBRATION_DATA = load_syringe_calibration_data()
 
+
+def run_syringe_job(syringe_screen, draw_mm, status_fn, z_to_zero_fn, z_to_endstop_fn):
+    """Execute a complete syringe draw job.
+
+    This is the single authoritative implementation of the syringe job sequence.
+    Whenever a "Spritzen-Job" is run in this application, this function is used.
+
+    Sequence:
+      1. Enable syringe stepper
+      2. Move Z to zero (using z_to_zero_fn)
+      3. Draw pre_air_mm (Luft vorsaugen)
+      4. Move Z to endstop / into liquid (using z_to_endstop_fn)
+      5. Draw draw_mm of liquid
+      6. Dwell (calibration_dwell_s seconds)
+      7. Move Z back to zero
+      8. Draw post_air_mm (Zusatz-Luft)
+
+    Args:
+        syringe_screen:    SyringeScreen instance (provides movement methods)
+        draw_mm:           positive distance in mm to draw (sign handled internally)
+        status_fn:         callable(str) for status/log messages
+        z_to_zero_fn:      callable() -> bool  – moves Z to 0, returns True on success
+        z_to_endstop_fn:   callable() -> bool  – moves Z to endstop, returns True on success
+
+    Returns:
+        True on success, False on any failure.
+    """
+    sequence = {}
+    if isinstance(SYRINGE_CALIBRATION_DATA, dict):
+        seq_raw = SYRINGE_CALIBRATION_DATA.get('sequence', {})
+        if isinstance(seq_raw, dict):
+            sequence = seq_raw
+
+    defaults = default_syringe_calibration_data().get('sequence', {})
+    try:
+        pre_air_mm = float(sequence.get('pre_air_mm', defaults.get('pre_air_mm', 10.0)))
+    except (TypeError, ValueError):
+        pre_air_mm = float(defaults.get('pre_air_mm', 10.0))
+    try:
+        post_air_mm = float(sequence.get('post_air_mm', defaults.get('post_air_mm', 2.0)))
+    except (TypeError, ValueError):
+        post_air_mm = float(defaults.get('post_air_mm', 2.0))
+
+    dwell_s = float(CONFIG.get('calibration_dwell_s', 10.0))
+    draw_sign = -syringe_screen._home_search_sign()
+
+    def _draw_relative(distance_mm, error_msg):
+        current = syringe_screen.syringe_position_mm
+        target = syringe_screen._clamp_syringe_target(current + float(distance_mm))
+        if abs(target - current) < 1e-6:
+            status_fn("Spritzenweg begrenzt: Grenze erreicht")
+            return False
+        return syringe_screen._move_to_position(target, error_msg)
+
+    # Step 1: enable syringe
+    if not syringe_screen._send_syringe_command(
+        "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
+        "Fehler: Spritze konnte nicht aktiviert werden"
+    ):
+        status_fn("Fehler: Spritze konnte nicht aktiviert werden")
+        return False
+
+    # Step 2: Z to zero
+    status_fn("Z auf 0 fahren...")
+    if not z_to_zero_fn():
+        return False
+
+    # Step 3: pre-air
+    status_fn(f"Luft vorsaugen: {pre_air_mm:.1f} mm")
+    if not _draw_relative(draw_sign * pre_air_mm, "Fehler: Vorzug-Luft fehlgeschlagen"):
+        status_fn("Fehler: Vorzug-Luft fehlgeschlagen")
+        return False
+
+    # Step 4: Z to endstop (into liquid)
+    status_fn("Z zum Endschalter (Flüssigkeit)...")
+    if not z_to_endstop_fn():
+        return False
+
+    # Step 5: draw liquid
+    status_fn(f"Aufziehen: {draw_mm:.2f} mm")
+    if not _draw_relative(draw_sign * float(draw_mm), "Fehler: Aufziehen fehlgeschlagen"):
+        status_fn("Fehler: Aufziehen fehlgeschlagen")
+        return False
+
+    # Step 6: dwell before lifting Z
+    status_fn(f"Warte {dwell_s:.0f}s vor Z-Auffahrt...")
+    time.sleep(max(0.0, dwell_s))
+
+    # Step 7: Z back to zero
+    status_fn("Z zurück auf 0...")
+    if not z_to_zero_fn():
+        return False
+
+    # Step 8: post-air
+    status_fn(f"Zusatz-Luft: {post_air_mm:.1f} mm")
+    if not _draw_relative(draw_sign * post_air_mm, "Fehler: Zusatz-Luft fehlgeschlagen"):
+        status_fn("Fehler: Zusatz-Luft fehlgeschlagen")
+        return False
+
+    status_fn(f"Spritzen-Job abgeschlossen ({draw_mm:.2f} mm Flüssigkeit)")
+    return True
+
+
 # base directories for resources
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(BASE_DIR, CONFIG.get('icon_dir', 'Icons'))
@@ -1595,45 +1698,16 @@ class SyringeCalibrationPopup(Popup):
         return True
 
     def run_calibration(self, travel_mm):
-        global SYRINGE_CALIBRATION_DATA
-        draw_sign = -self.syringe_screen._home_search_sign()
-        sequence = SYRINGE_CALIBRATION_DATA.get('sequence', {}) if isinstance(SYRINGE_CALIBRATION_DATA, dict) else {}
-        pre_air_mm = float(sequence.get('pre_air_mm', 10.0))
-        post_air_mm = float(sequence.get('post_air_mm', float(CONFIG.get('calibration_final_draw_mm', 2.0))))
         self._set_status(f"Kalibration {int(travel_mm)} mm startet...")
 
-        if not self.syringe_screen._send_syringe_command(
-            "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
-            "Fehler: Spritze konnte nicht aktiviert werden"
-        ):
-            self._set_status("Fehler: Spritze konnte nicht aktiviert werden")
-            return
-
-        if not self._move_z_to_zero():
-            return
-
-        if not self._draw_relative_mm(draw_sign * pre_air_mm, "Fehler: Vorzug-Luft fehlgeschlagen"):
-            self._set_status("Fehler: Vorzug fehlgeschlagen")
-            return
-
-        if not self._move_z_to_endstop():
-            return
-
-        if not self._draw_relative_mm(draw_sign * float(travel_mm), f"Fehler: Aufziehen {int(travel_mm)} mm fehlgeschlagen"):
-            self._set_status(f"Fehler: Aufziehen {int(travel_mm)} mm fehlgeschlagen")
-            return
-
-        self._set_status(f"Warte {self.calibration_dwell_s:.0f}s nach Aufziehen {int(travel_mm)} mm...")
-        time.sleep(max(0.0, self.calibration_dwell_s))
-
-        if not self._move_z_to_zero():
-            return
-
-        if not self._draw_relative_mm(
-            draw_sign * post_air_mm,
-            f"Fehler: Zusatz-Aufziehen {post_air_mm:.1f} mm fehlgeschlagen"
-        ):
-            self._set_status(f"Fehler: Zusatz-Aufziehen {post_air_mm:.1f} mm fehlgeschlagen")
+        ok = run_syringe_job(
+            syringe_screen=self.syringe_screen,
+            draw_mm=float(travel_mm),
+            status_fn=self._set_status,
+            z_to_zero_fn=self._move_z_to_zero,
+            z_to_endstop_fn=self._move_z_to_endstop
+        )
+        if not ok:
             return
 
         for btn in self.output_buttons.values():
@@ -1884,43 +1958,19 @@ class MotorTestingPopup(Popup):
             self._set_status("Fehler: Kalibration fehlt oder ungültig")
             return False
 
-        sequence = self._sequence_settings()
-        pre_air_mm = float(sequence.get('pre_air_mm', 10.0))
-        post_air_mm = float(sequence.get('post_air_mm', 2.0))
-        draw_sign = -syringe_screen._home_search_sign()
+        def _z_to_zero():
+            if not self.motor_screen.ensure_z_homed_and_zero(force_rehome=False):
+                self._set_status("Fehler: Z konnte nicht auf 0 gebracht werden")
+                return False
+            return True
 
-        if not syringe_screen._send_syringe_command(
-            "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
-            "Fehler: Spritze konnte nicht aktiviert werden"
-        ):
-            self._set_status("Fehler: Spritze konnte nicht aktiviert werden")
-            return False
-
-        if not self.motor_screen.ensure_z_homed_and_zero(force_rehome=False):
-            self._set_status("Fehler: Z konnte nicht auf 0 gebracht werden")
-            return False
-
-        if not self._draw_relative_mm(syringe_screen, draw_sign * pre_air_mm, "Fehler: Vorzug-Luft fehlgeschlagen"):
-            self._set_status("Fehler: Vorzug-Luft fehlgeschlagen")
-            return False
-
-        if not self._move_z_to_endstop():
-            return False
-
-        if not self._draw_relative_mm(syringe_screen, draw_sign * draw_mm, "Fehler: Aufziehen fehlgeschlagen"):
-            self._set_status("Fehler: Aufziehen fehlgeschlagen")
-            return False
-
-        if not self.motor_screen.ensure_z_homed_and_zero(force_rehome=False):
-            self._set_status("Fehler: Z konnte nicht auf 0 zurückfahren")
-            return False
-
-        if not self._draw_relative_mm(syringe_screen, draw_sign * post_air_mm, "Fehler: Zusatz-Luft fehlgeschlagen"):
-            self._set_status("Fehler: Zusatz-Luft fehlgeschlagen")
-            return False
-
-        self._set_status(f"Aufziehen abgeschlossen: {ml_value:.3f} ml")
-        return True
+        return run_syringe_job(
+            syringe_screen=syringe_screen,
+            draw_mm=draw_mm,
+            status_fn=self._set_status,
+            z_to_zero_fn=_z_to_zero,
+            z_to_endstop_fn=self._move_z_to_endstop
+        )
 
     def _positions_file_candidates(self):
         return ["position.json", "positions.json"]
