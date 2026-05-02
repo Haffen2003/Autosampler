@@ -114,7 +114,7 @@ def load_syringe_calibration_data():
         'points': {
             '30': points.get('30'),
             '80': points.get('80'),
-            '140': points.get('140')
+            '130': points.get('130')
         },
         'sequence': {
             'pre_air_mm': pre_air_mm,
@@ -1446,7 +1446,7 @@ class SyringeCalibrationPopup(Popup):
         self.z_settle_time_s = float(CONFIG.get('z_settle_time_s', 1.0))
         self.z_wait_timeout_s = float(CONFIG.get('z_wait_timeout_s', 180.0))
         self.calibration_dwell_s = float(CONFIG.get('calibration_dwell_s', 10.0))
-        self.travel_distances = (30.0, 80.0, 140.0)
+        self.travel_distances = (30.0, 80.0, 130.0)
         self.measure_inputs = {}
         self.output_buttons = {}
 
@@ -1694,7 +1694,7 @@ class SyringeCalibrationPopup(Popup):
             'points': {
                 '30': measured_values[30.0],
                 '80': measured_values[80.0],
-                '140': measured_values[140.0]
+                '130': measured_values[130.0]
             },
             'sequence': {
                 'pre_air_mm': float(existing_sequence.get('pre_air_mm', float(CONFIG.get('calibration_pre_air_mm', 10.0)))),
