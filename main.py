@@ -57,29 +57,36 @@ CALIBRATION_FILE = "calibration.json"
 
 
 def default_syringe_calibration_data():
+    pre_air_mm = float(CONFIG.get('calibration_pre_air_mm', 10.0))
+    post_air_mm = float(CONFIG.get('calibration_final_draw_mm', 2.0))
     return {
         'slope_ml_per_mm': None,
         'mm_per_ml': None,
-        'points': {}
+        'points': {},
+        'sequence': {
+            'pre_air_mm': pre_air_mm,
+            'post_air_mm': post_air_mm
+        }
     }
 
 
 def load_syringe_calibration_data():
+    defaults = default_syringe_calibration_data()
     if not os.path.exists(CALIBRATION_FILE):
-        return default_syringe_calibration_data()
+        return defaults
 
     try:
         with open(CALIBRATION_FILE, 'r') as f:
             raw_data = json.load(f)
     except json.JSONDecodeError:
         logging.error(f'Error decoding {CALIBRATION_FILE}, using defaults')
-        return default_syringe_calibration_data()
+        return defaults
     except Exception as e:
         logging.error(f'Error loading calibration: {e}')
-        return default_syringe_calibration_data()
+        return defaults
 
     if not isinstance(raw_data, dict):
-        return default_syringe_calibration_data()
+        return defaults
 
     points_raw = raw_data.get('points', {})
     points = points_raw if isinstance(points_raw, dict) else {}
@@ -88,6 +95,18 @@ def load_syringe_calibration_data():
     mm_per_ml = raw_data.get('mm_per_ml')
     slope = float(slope) if slope is not None else None
     mm_per_ml = float(mm_per_ml) if mm_per_ml is not None else None
+    sequence_raw = raw_data.get('sequence', {})
+    sequence_raw = sequence_raw if isinstance(sequence_raw, dict) else {}
+
+    try:
+        pre_air_mm = float(sequence_raw.get('pre_air_mm', defaults['sequence']['pre_air_mm']))
+    except (TypeError, ValueError):
+        pre_air_mm = defaults['sequence']['pre_air_mm']
+
+    try:
+        post_air_mm = float(sequence_raw.get('post_air_mm', defaults['sequence']['post_air_mm']))
+    except (TypeError, ValueError):
+        post_air_mm = defaults['sequence']['post_air_mm']
 
     return {
         'slope_ml_per_mm': slope,
@@ -96,6 +115,10 @@ def load_syringe_calibration_data():
             '30': points.get('30'),
             '80': points.get('80'),
             '140': points.get('140')
+        },
+        'sequence': {
+            'pre_air_mm': pre_air_mm,
+            'post_air_mm': post_air_mm
         }
     }
 
@@ -243,6 +266,7 @@ from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.image import Image
 from kivy.uix.switch import Switch
+from kivy.uix.checkbox import CheckBox
 from kivy.uix.popup import Popup
 from kivy.properties import NumericProperty
 from kivy.clock import Clock
@@ -888,6 +912,10 @@ class MotorPositionScreen(Screen):
         send_btn = Button(text="Senden", size_hint=(1, 0.5), font_size=12)
         send_btn.bind(on_press=self.send_position)
         button_box.add_widget(send_btn)
+
+        testing_btn = Button(text="Testing", size_hint=(1, 0.5), font_size=12)
+        testing_btn.bind(on_press=self.open_testing_popup)
+        button_box.add_widget(testing_btn)
         
         input_area.add_widget(button_box)
         self.layout.add_widget(input_area)
@@ -907,6 +935,10 @@ class MotorPositionScreen(Screen):
 
         self.add_widget(self.layout)
         self.update_xy_home_lock_state(refresh_z_position=False)
+
+    def open_testing_popup(self, _instance):
+        popup = MotorTestingPopup(self)
+        popup.open()
 
     def set_status(self, message, level='info'):
         """Update status text in the motor UI."""
@@ -1414,7 +1446,6 @@ class SyringeCalibrationPopup(Popup):
         self.z_settle_time_s = float(CONFIG.get('z_settle_time_s', 1.0))
         self.z_wait_timeout_s = float(CONFIG.get('z_wait_timeout_s', 180.0))
         self.calibration_dwell_s = float(CONFIG.get('calibration_dwell_s', 10.0))
-        self.calibration_final_draw_mm = float(CONFIG.get('calibration_final_draw_mm', 2.0))
         self.travel_distances = (30.0, 80.0, 140.0)
         self.measure_inputs = {}
         self.output_buttons = {}
@@ -1564,7 +1595,11 @@ class SyringeCalibrationPopup(Popup):
         return True
 
     def run_calibration(self, travel_mm):
+        global SYRINGE_CALIBRATION_DATA
         draw_sign = -self.syringe_screen._home_search_sign()
+        sequence = SYRINGE_CALIBRATION_DATA.get('sequence', {}) if isinstance(SYRINGE_CALIBRATION_DATA, dict) else {}
+        pre_air_mm = float(sequence.get('pre_air_mm', 10.0))
+        post_air_mm = float(sequence.get('post_air_mm', float(CONFIG.get('calibration_final_draw_mm', 2.0))))
         self._set_status(f"Kalibration {int(travel_mm)} mm startet...")
 
         if not self.syringe_screen._send_syringe_command(
@@ -1577,7 +1612,7 @@ class SyringeCalibrationPopup(Popup):
         if not self._move_z_to_zero():
             return
 
-        if not self._draw_relative_mm(draw_sign * 10.0, "Fehler: 10 mm Vorzug fehlgeschlagen"):
+        if not self._draw_relative_mm(draw_sign * pre_air_mm, "Fehler: Vorzug-Luft fehlgeschlagen"):
             self._set_status("Fehler: Vorzug fehlgeschlagen")
             return
 
@@ -1595,10 +1630,10 @@ class SyringeCalibrationPopup(Popup):
             return
 
         if not self._draw_relative_mm(
-            draw_sign * self.calibration_final_draw_mm,
-            f"Fehler: Zusatz-Aufziehen {self.calibration_final_draw_mm:.1f} mm fehlgeschlagen"
+            draw_sign * post_air_mm,
+            f"Fehler: Zusatz-Aufziehen {post_air_mm:.1f} mm fehlgeschlagen"
         ):
-            self._set_status(f"Fehler: Zusatz-Aufziehen {self.calibration_final_draw_mm:.1f} mm fehlgeschlagen")
+            self._set_status(f"Fehler: Zusatz-Aufziehen {post_air_mm:.1f} mm fehlgeschlagen")
             return
 
         for btn in self.output_buttons.values():
@@ -1647,6 +1682,12 @@ class SyringeCalibrationPopup(Popup):
             return
 
         global SYRINGE_CALIBRATION_DATA
+        existing_sequence = {}
+        if isinstance(SYRINGE_CALIBRATION_DATA, dict):
+            sequence_data = SYRINGE_CALIBRATION_DATA.get('sequence', {})
+            if isinstance(sequence_data, dict):
+                existing_sequence = sequence_data
+
         SYRINGE_CALIBRATION_DATA = {
             'slope_ml_per_mm': slope_ml_per_mm,
             'mm_per_ml': 1.0 / slope_ml_per_mm,
@@ -1654,6 +1695,10 @@ class SyringeCalibrationPopup(Popup):
                 '30': measured_values[30.0],
                 '80': measured_values[80.0],
                 '140': measured_values[140.0]
+            },
+            'sequence': {
+                'pre_air_mm': float(existing_sequence.get('pre_air_mm', float(CONFIG.get('calibration_pre_air_mm', 10.0)))),
+                'post_air_mm': float(existing_sequence.get('post_air_mm', float(CONFIG.get('calibration_final_draw_mm', 2.0))))
             }
         }
 
@@ -1665,6 +1710,351 @@ class SyringeCalibrationPopup(Popup):
             f"Steigung gespeichert (calibration.json): {slope_ml_per_mm:.6f} ml/mm | "
             f"Umrechnung: {SYRINGE_CALIBRATION_DATA['mm_per_ml']:.6f} mm/ml"
         )
+
+
+class MotorTestingPopup(Popup):
+    def __init__(self, motor_screen, **kwargs):
+        super().__init__(**kwargs)
+        self.motor_screen = motor_screen
+        self.title = "Testing"
+        self.size_hint = (0.92, 0.92)
+        self.auto_dismiss = False
+
+        root = BoxLayout(orientation='vertical', padding=[16, 14, 16, 14], spacing=10)
+
+        root.add_widget(Label(
+            text="Menge in ml eingeben und Aufziehen starten.",
+            size_hint_y=None,
+            height=30,
+            font_size=16,
+            halign='left',
+            valign='middle'
+        ))
+
+        ml_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=46, spacing=8)
+        ml_row.add_widget(Label(text="Menge (ml)", size_hint=(None, 1), width=130, font_size=16))
+        self.ml_input = TextInput(multiline=False, input_filter='float', font_size=16)
+        ml_row.add_widget(self.ml_input)
+        root.add_widget(ml_row)
+
+        action_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=54, spacing=10)
+        draw_btn = Button(text="Aufziehen", font_size=18)
+        output_btn = Button(text="Ausgabe", font_size=18)
+        draw_btn.bind(on_press=self.start_single_draw)
+        output_btn.bind(on_press=self.run_output)
+        action_row.add_widget(draw_btn)
+        action_row.add_widget(output_btn)
+        root.add_widget(action_row)
+
+        advanced_header = BoxLayout(orientation='horizontal', size_hint=(1, None), height=42, spacing=8)
+        self.advanced_checkbox = CheckBox(active=False, size_hint=(None, None), size=(32, 32))
+        self.advanced_checkbox.bind(active=self.on_advanced_toggle)
+        advanced_header.add_widget(self.advanced_checkbox)
+        advanced_header.add_widget(Label(text="Erweitert", halign='left', valign='middle', font_size=17))
+        root.add_widget(advanced_header)
+
+        self.advanced_layout = BoxLayout(orientation='vertical', size_hint=(1, None), height=228, spacing=8)
+
+        end_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=44, spacing=8)
+        end_row.add_widget(Label(text="Position Ende", size_hint=(None, 1), width=150, font_size=15))
+        self.position_end_input = TextInput(multiline=False, input_filter='int', hint_text="Slot 1-15", font_size=15)
+        end_row.add_widget(self.position_end_input)
+        self.advanced_layout.add_widget(end_row)
+
+        self.position_ml_inputs = {}
+        for idx in (1, 2, 3):
+            pos_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=44, spacing=8)
+            pos_row.add_widget(Label(text=f"Position {idx} (ml)", size_hint=(None, 1), width=150, font_size=15))
+            inp = TextInput(multiline=False, input_filter='float', hint_text="ml", font_size=15)
+            pos_row.add_widget(inp)
+            self.position_ml_inputs[idx] = inp
+            self.advanced_layout.add_widget(pos_row)
+
+        self.start_advanced_btn = Button(text="Start", size_hint=(1, None), height=48, font_size=18)
+        self.start_advanced_btn.bind(on_press=self.start_advanced_sequence)
+        self.advanced_layout.add_widget(self.start_advanced_btn)
+        root.add_widget(self.advanced_layout)
+
+        self.status_label = Label(
+            text="Bereit",
+            size_hint_y=None,
+            height=32,
+            font_size=15,
+            halign='left',
+            valign='middle',
+            color=[0.88, 0.95, 1, 1]
+        )
+        self.status_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(self.status_label)
+
+        bottom_row = BoxLayout(orientation='horizontal', size_hint=(1, None), height=56)
+        close_btn = Button(text="Schließen", font_size=18)
+        close_btn.bind(on_press=lambda _btn: self.dismiss())
+        bottom_row.add_widget(close_btn)
+        root.add_widget(bottom_row)
+
+        self.content = root
+        self.on_advanced_toggle(self.advanced_checkbox, False)
+
+    def _set_status(self, message):
+        self.status_label.text = message
+        logging.info(f"Testing popup: {message}")
+
+    def _parse_decimal(self, text):
+        normalized = str(text).strip().replace(',', '.')
+        if not normalized:
+            raise ValueError("empty")
+        return float(normalized)
+
+    def _get_syringe_screen(self):
+        if not self.motor_screen.manager:
+            return None
+        try:
+            return self.motor_screen.manager.get_screen("syringe")
+        except Exception:
+            return None
+
+    def _send_gcode(self, command, error_message, timeout_s=None):
+        if moonraker.send_gcode(command, timeout_s=timeout_s):
+            return True
+        self._set_status(error_message)
+        logging.error(f"Testing popup command failed: {command}")
+        return False
+
+    def _mm_for_ml(self, ml_value):
+        global SYRINGE_CALIBRATION_DATA
+        if not isinstance(SYRINGE_CALIBRATION_DATA, dict):
+            return None
+        mm_per_ml = SYRINGE_CALIBRATION_DATA.get('mm_per_ml')
+        if mm_per_ml is None:
+            return None
+        try:
+            mm_per_ml = float(mm_per_ml)
+        except (TypeError, ValueError):
+            return None
+        if mm_per_ml <= 0:
+            return None
+        return float(ml_value) * mm_per_ml
+
+    def _sequence_settings(self):
+        global SYRINGE_CALIBRATION_DATA
+        defaults = default_syringe_calibration_data().get('sequence', {})
+        if not isinstance(SYRINGE_CALIBRATION_DATA, dict):
+            return defaults
+        sequence_data = SYRINGE_CALIBRATION_DATA.get('sequence', {})
+        if not isinstance(sequence_data, dict):
+            return defaults
+
+        try:
+            pre_air_mm = float(sequence_data.get('pre_air_mm', defaults.get('pre_air_mm', 10.0)))
+        except (TypeError, ValueError):
+            pre_air_mm = float(defaults.get('pre_air_mm', 10.0))
+
+        try:
+            post_air_mm = float(sequence_data.get('post_air_mm', defaults.get('post_air_mm', 2.0)))
+        except (TypeError, ValueError):
+            post_air_mm = float(defaults.get('post_air_mm', 2.0))
+
+        return {
+            'pre_air_mm': pre_air_mm,
+            'post_air_mm': post_air_mm
+        }
+
+    def _draw_relative_mm(self, syringe_screen, draw_distance_mm, error_message):
+        current = syringe_screen.syringe_position_mm
+        target = syringe_screen._clamp_syringe_target(current + float(draw_distance_mm))
+        if abs(target - current) < 1e-6:
+            self._set_status("Spritzenweg begrenzt: Grenze erreicht")
+            return False
+        return syringe_screen._move_to_position(target, error_message)
+
+    def _move_z_to_endstop(self):
+        if not self._send_gcode("G90", "Fehler: G90 konnte nicht gesetzt werden"):
+            return False
+        return self._send_gcode("G28 Z", "Fehler: Z konnte nicht auf Endschalter fahren", timeout_s=45.0)
+
+    def _run_draw_sequence_ml(self, ml_value):
+        syringe_screen = self._get_syringe_screen()
+        if syringe_screen is None:
+            self._set_status("Fehler: Spritzen-Screen nicht verfügbar")
+            return False
+
+        draw_mm = self._mm_for_ml(ml_value)
+        if draw_mm is None or draw_mm <= 0:
+            self._set_status("Fehler: Kalibration fehlt oder ungültig")
+            return False
+
+        sequence = self._sequence_settings()
+        pre_air_mm = float(sequence.get('pre_air_mm', 10.0))
+        post_air_mm = float(sequence.get('post_air_mm', 2.0))
+        draw_sign = -syringe_screen._home_search_sign()
+
+        if not syringe_screen._send_syringe_command(
+            "MANUAL_STEPPER STEPPER=syringe ENABLE=1",
+            "Fehler: Spritze konnte nicht aktiviert werden"
+        ):
+            self._set_status("Fehler: Spritze konnte nicht aktiviert werden")
+            return False
+
+        if not self.motor_screen.ensure_z_homed_and_zero(force_rehome=False):
+            self._set_status("Fehler: Z konnte nicht auf 0 gebracht werden")
+            return False
+
+        if not self._draw_relative_mm(syringe_screen, draw_sign * pre_air_mm, "Fehler: Vorzug-Luft fehlgeschlagen"):
+            self._set_status("Fehler: Vorzug-Luft fehlgeschlagen")
+            return False
+
+        if not self._move_z_to_endstop():
+            return False
+
+        if not self._draw_relative_mm(syringe_screen, draw_sign * draw_mm, "Fehler: Aufziehen fehlgeschlagen"):
+            self._set_status("Fehler: Aufziehen fehlgeschlagen")
+            return False
+
+        if not self.motor_screen.ensure_z_homed_and_zero(force_rehome=False):
+            self._set_status("Fehler: Z konnte nicht auf 0 zurückfahren")
+            return False
+
+        if not self._draw_relative_mm(syringe_screen, draw_sign * post_air_mm, "Fehler: Zusatz-Luft fehlgeschlagen"):
+            self._set_status("Fehler: Zusatz-Luft fehlgeschlagen")
+            return False
+
+        self._set_status(f"Aufziehen abgeschlossen: {ml_value:.3f} ml")
+        return True
+
+    def _positions_file_candidates(self):
+        return ["position.json", "positions.json"]
+
+    def _load_positions_for_testing(self):
+        for filename in self._positions_file_candidates():
+            if not os.path.exists(filename):
+                continue
+            try:
+                with open(filename, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                logging.error(f"{filename} is corrupted")
+            except Exception as exc:
+                logging.error(f"Error reading {filename}: {exc}")
+        return {}
+
+    def _move_xy_to_slot(self, slot_index):
+        positions = self._load_positions_for_testing()
+        key = str(int(slot_index))
+        raw = positions.get(key, {}) if isinstance(positions.get(key, {}), dict) else {}
+
+        if not raw:
+            self._set_status(f"Fehler: Position {key} fehlt in position(s).json")
+            return False
+
+        try:
+            x_value = float(str(raw.get("x", "")).replace(',', '.'))
+            y_value = float(str(raw.get("y", "")).replace(',', '.'))
+            speed_value = float(str(raw.get("speed", self.motor_screen.default_slot_speed)).replace(',', '.'))
+        except (TypeError, ValueError):
+            self._set_status(f"Fehler: Position {key} enthält ungültige Werte")
+            return False
+
+        if self.motor_screen.z_safety_enabled:
+            if not self.motor_screen.ensure_z_homed_and_zero(force_rehome=False):
+                self._set_status("Fehler: XY gesperrt, Z-Sicherheit fehlgeschlagen")
+                return False
+
+        if not self._send_gcode("G90", "Fehler: G90 konnte nicht gesetzt werden"):
+            return False
+
+        if not self._send_gcode(f"G1 F{self.motor_screen._fmt_number(speed_value)}", "Fehler: XY-Geschwindigkeit konnte nicht gesetzt werden"):
+            return False
+
+        return self._send_gcode(
+            f"G1 X{self.motor_screen._fmt_number(x_value)} Y{self.motor_screen._fmt_number(y_value)}",
+            f"Fehler: XY-Fahrt zu Position {key} fehlgeschlagen"
+        )
+
+    def on_advanced_toggle(self, _instance, active):
+        enabled = bool(active)
+        self.position_end_input.disabled = not enabled
+        self.position_end_input.opacity = 1.0 if enabled else 0.45
+        for inp in self.position_ml_inputs.values():
+            inp.disabled = not enabled
+            inp.opacity = 1.0 if enabled else 0.45
+        self.start_advanced_btn.disabled = not enabled
+        self.start_advanced_btn.opacity = 1.0 if enabled else 0.45
+        self.advanced_layout.opacity = 1.0 if enabled else 0.6
+
+    def start_single_draw(self, _instance):
+        try:
+            ml_value = self._parse_decimal(self.ml_input.text)
+        except ValueError:
+            self._set_status("Bitte gültige ml-Menge eintragen")
+            return
+
+        if ml_value <= 0:
+            self._set_status("Menge muss größer als 0 sein")
+            return
+
+        self._set_status(f"Aufziehen startet: {ml_value:.3f} ml")
+        self._run_draw_sequence_ml(ml_value)
+
+    def run_output(self, _instance):
+        syringe_screen = self._get_syringe_screen()
+        if syringe_screen is None:
+            self._set_status("Fehler: Spritzen-Screen nicht verfügbar")
+            return
+
+        if syringe_screen.home_syringe(None):
+            self._set_status("Ausgabe abgeschlossen: Spritze am Endschalter")
+        else:
+            self._set_status("Fehler: Ausgabe fehlgeschlagen")
+
+    def _parse_slot_index(self, raw_text):
+        slot_value = int(str(raw_text).strip())
+        if slot_value < 1 or slot_value > 15:
+            raise ValueError
+        return slot_value
+
+    def start_advanced_sequence(self, _instance):
+        try:
+            end_slot = self._parse_slot_index(self.position_end_input.text)
+        except ValueError:
+            self._set_status("Position Ende muss ein Slot von 1 bis 15 sein")
+            return
+
+        ml_values = {}
+        for slot_idx in (1, 2, 3):
+            try:
+                ml_value = self._parse_decimal(self.position_ml_inputs[slot_idx].text)
+            except ValueError:
+                self._set_status(f"Bitte gültige ml-Menge für Position {slot_idx} eintragen")
+                return
+            if ml_value <= 0:
+                self._set_status(f"Menge bei Position {slot_idx} muss größer als 0 sein")
+                return
+            ml_values[slot_idx] = ml_value
+
+        for slot_idx in (1, 2, 3):
+            self._set_status(f"Position {slot_idx}: XY-Fahrt startet")
+            if not self._move_xy_to_slot(slot_idx):
+                return
+
+            if not self._run_draw_sequence_ml(ml_values[slot_idx]):
+                return
+
+            self._set_status(f"Fahre zur Endposition {end_slot} und entleere")
+            if not self._move_xy_to_slot(end_slot):
+                return
+
+            syringe_screen = self._get_syringe_screen()
+            if syringe_screen is None:
+                self._set_status("Fehler: Spritzen-Screen nicht verfügbar")
+                return
+            if not syringe_screen.home_syringe(None):
+                self._set_status("Fehler: Ausgabe an Endposition fehlgeschlagen")
+                return
+
+        self._set_status("Erweiterter Ablauf fertig: Position 1-3 abgearbeitet")
 
 
 class SyringeScreen(Screen):
