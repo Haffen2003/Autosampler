@@ -58,6 +58,74 @@ ENABLE_COCKTAIL_SCREEN = bool(CONFIG.get('enable_cocktail_screen', False))
 CALIBRATION_FILE = "calibration.json"
 
 
+def _load_z_endstop_clearance_mm():
+    try:
+        return max(0.0, float(CONFIG.get('z_endstop_clearance_mm', 10.0)))
+    except (TypeError, ValueError):
+        return 10.0
+
+
+Z_ENDSTOP_CLEARANCE_MM = _load_z_endstop_clearance_mm()
+
+
+def move_z_to_endstop_with_clearance(status_fn=None, speed_mm_min=None, home_timeout_s=45.0):
+    """Home Z to the endstop and then move away by configured clearance."""
+    clearance_mm = max(0.0, float(Z_ENDSTOP_CLEARANCE_MM))
+
+    def _status(message):
+        if callable(status_fn):
+            status_fn(message)
+
+    if not moonraker.send_gcode("G90"):
+        _status("Fehler: G90 konnte nicht gesetzt werden")
+        return False
+
+    z_before_home = moonraker.get_current_z_position()
+    if not moonraker.send_gcode("G28 Z", timeout_s=home_timeout_s):
+        _status("Fehler: Z konnte nicht auf Endschalter fahren")
+        return False
+
+    # Pure homing call requested: keep endstop position without additional move.
+    if clearance_mm <= 0.0:
+        return True
+
+    z_after_home = moonraker.get_current_z_position()
+
+    # Move away from the endstop in the direction where Z was before homing.
+    direction = 1.0
+    if z_before_home is not None and z_after_home is not None:
+        delta = float(z_before_home) - float(z_after_home)
+        if abs(delta) > 1e-6:
+            direction = 1.0 if delta > 0.0 else -1.0
+
+    if speed_mm_min is not None:
+        try:
+            speed_value = max(1.0, float(speed_mm_min))
+            if not moonraker.send_gcode(f"G1 F{speed_value:.0f}"):
+                _status("Fehler: Z-Geschwindigkeit konnte nicht gesetzt werden")
+                return False
+        except (TypeError, ValueError):
+            pass
+
+    if z_after_home is None:
+        # Fallback if no absolute Z value is available right after homing.
+        if not moonraker.send_gcode(f"G91\nG1 Z{clearance_mm:.3f}\nG90", timeout_s=25.0):
+            _status("Fehler: Z-Abstand vom Endschalter konnte nicht gefahren werden")
+            return False
+        return True
+
+    primary_target = float(z_after_home) + (direction * clearance_mm)
+    if moonraker.send_gcode(f"G1 Z{primary_target:.3f}", timeout_s=25.0):
+        return True
+
+    secondary_target = float(z_after_home) - (direction * clearance_mm)
+    if moonraker.send_gcode(f"G1 Z{secondary_target:.3f}", timeout_s=25.0):
+        return True
+
+    _status("Fehler: Z konnte nicht mit Endschalter-Abstand positioniert werden")
+    return False
+
+
 def default_syringe_calibration_data():
     pre_air_mm = float(CONFIG.get('calibration_pre_air_mm', 10.0))
     post_air_mm = float(CONFIG.get('calibration_final_draw_mm', 2.0))
@@ -2081,7 +2149,7 @@ class MotorPositionScreen(Screen):
             self.set_status("Fehler: G90 konnte nicht gesetzt werden", "error")
             return
 
-        if not moonraker.send_gcode("G28 Z", timeout_s=45.0):
+        if not move_z_to_endstop_with_clearance(status_fn=lambda msg: self.set_status(msg, "error"), speed_mm_min=self.z_move_speed):
             self.set_status("Z Down fehlgeschlagen", "error")
             return
 
@@ -2095,8 +2163,8 @@ class MotorPositionScreen(Screen):
         self.z_reference_known = True
         self.z_is_zero = abs(current_z) <= self.z_zero_tolerance
         self.update_xy_home_lock_state(refresh_z_position=False)
-        logging.info(f"Z moved to endstop via Z Down (Z={current_z:.3f})")
-        self.set_status("Z auf Endstop gefahren", "success")
+        logging.info(f"Z moved to endstop clearance via Z Down (Z={current_z:.3f}, clearance={Z_ENDSTOP_CLEARANCE_MM:.1f} mm)")
+        self.set_status(f"Z auf {Z_ENDSTOP_CLEARANCE_MM:.1f} mm über Endstop", "success")
 
     def disable_motors(self, instance):
         """Disable stepper motors (holding current off)."""
@@ -2316,11 +2384,11 @@ class SyringeCalibrationPopup(Popup):
         return True
 
     def _move_z_to_endstop(self):
-        if not self._send_gcode("G90", "Fehler: G90 konnte nicht gesetzt werden"):
-            return False
-        if not self._send_gcode("G28 Z", "Fehler: Z konnte nicht referenziert werden", timeout_s=45.0):
-            return False
-        return True
+        return move_z_to_endstop_with_clearance(
+            status_fn=self._set_status,
+            speed_mm_min=self.z_move_speed,
+            home_timeout_s=45.0
+        )
 
     def run_calibration(self, travel_mm):
         self._set_status(f"Kalibration {int(travel_mm)} mm startet...")
@@ -2568,9 +2636,11 @@ class MotorTestingPopup(Popup):
         return syringe_screen._move_to_position(target, error_message)
 
     def _move_z_to_endstop(self):
-        if not self._send_gcode("G90", "Fehler: G90 konnte nicht gesetzt werden"):
-            return False
-        return self._send_gcode("G28 Z", "Fehler: Z konnte nicht auf Endschalter fahren", timeout_s=45.0)
+        return move_z_to_endstop_with_clearance(
+            status_fn=self._set_status,
+            speed_mm_min=self.motor_screen.z_move_speed,
+            home_timeout_s=45.0
+        )
 
     def _run_draw_sequence_ml(self, ml_value):
         syringe_screen = self._get_syringe_screen()
@@ -3434,9 +3504,12 @@ class HomeScreen(Screen):
             return True
 
         def _z_to_endstop():
-            if not self._send_gcode("G90", "Fehler: G90 konnte nicht gesetzt werden"):
-                return False
-            return self._send_gcode("G28 Z", "Fehler: Z konnte nicht auf Endschalter fahren", timeout_s=45.0)
+            motor_speed = motor_screen.z_move_speed if motor_screen else None
+            return move_z_to_endstop_with_clearance(
+                status_fn=self._set_status,
+                speed_mm_min=motor_speed,
+                home_timeout_s=45.0
+            )
 
         return run_syringe_job(
             syringe_screen=syringe_screen,
