@@ -66,10 +66,36 @@ def _load_z_endstop_clearance_mm():
 
 
 Z_ENDSTOP_CLEARANCE_MM = _load_z_endstop_clearance_mm()
+Z_ENDSTOP_REFERENCE_Z = None
+Z_ENDSTOP_AWAY_SIGN = 1.0
 
 
-def move_z_to_endstop_with_clearance(status_fn=None, speed_mm_min=None, home_timeout_s=45.0):
-    """Home Z to the endstop and then move away by configured clearance."""
+def _update_z_endstop_reference(z_before_home, z_after_home):
+    """Remember where Z endstop was reached and which direction moves away from it."""
+    global Z_ENDSTOP_REFERENCE_Z, Z_ENDSTOP_AWAY_SIGN
+    if z_after_home is None:
+        return
+
+    try:
+        z_after = float(z_after_home)
+    except (TypeError, ValueError):
+        return
+
+    away_sign = 1.0
+    try:
+        if z_before_home is not None:
+            delta = float(z_before_home) - z_after
+            if abs(delta) > 1e-6:
+                away_sign = 1.0 if delta > 0.0 else -1.0
+    except (TypeError, ValueError):
+        pass
+
+    Z_ENDSTOP_REFERENCE_Z = z_after
+    Z_ENDSTOP_AWAY_SIGN = away_sign
+
+
+def move_z_to_endstop_with_clearance(status_fn=None, speed_mm_min=None, home_timeout_s=45.0, home_first=False):
+    """Move Z to endstop reference + clearance; home only if explicitly requested."""
     clearance_mm = max(0.0, float(Z_ENDSTOP_CLEARANCE_MM))
 
     def _status(message):
@@ -80,23 +106,20 @@ def move_z_to_endstop_with_clearance(status_fn=None, speed_mm_min=None, home_tim
         _status("Fehler: G90 konnte nicht gesetzt werden")
         return False
 
-    z_before_home = moonraker.get_current_z_position()
-    if not moonraker.send_gcode("G28 Z", timeout_s=home_timeout_s):
-        _status("Fehler: Z konnte nicht auf Endschalter fahren")
+    if home_first:
+        z_before_home = moonraker.get_current_z_position()
+        if not moonraker.send_gcode("G28 Z", timeout_s=home_timeout_s):
+            _status("Fehler: Z konnte nicht auf Endschalter fahren")
+            return False
+
+        z_after_home = moonraker.get_current_z_position()
+        _update_z_endstop_reference(z_before_home, z_after_home)
+
+    if Z_ENDSTOP_REFERENCE_Z is None:
+        _status("Fehler: Z-Endschalter unbekannt. Bitte zuerst Z homen.")
         return False
 
-    # Pure homing call requested: keep endstop position without additional move.
-    if clearance_mm <= 0.0:
-        return True
-
-    z_after_home = moonraker.get_current_z_position()
-
-    # Move away from the endstop in the direction where Z was before homing.
-    direction = 1.0
-    if z_before_home is not None and z_after_home is not None:
-        delta = float(z_before_home) - float(z_after_home)
-        if abs(delta) > 1e-6:
-            direction = 1.0 if delta > 0.0 else -1.0
+    direction = float(Z_ENDSTOP_AWAY_SIGN)
 
     if speed_mm_min is not None:
         try:
@@ -107,18 +130,11 @@ def move_z_to_endstop_with_clearance(status_fn=None, speed_mm_min=None, home_tim
         except (TypeError, ValueError):
             pass
 
-    if z_after_home is None:
-        # Fallback if no absolute Z value is available right after homing.
-        if not moonraker.send_gcode(f"G91\nG1 Z{clearance_mm:.3f}\nG90", timeout_s=25.0):
-            _status("Fehler: Z-Abstand vom Endschalter konnte nicht gefahren werden")
-            return False
-        return True
-
-    primary_target = float(z_after_home) + (direction * clearance_mm)
+    primary_target = float(Z_ENDSTOP_REFERENCE_Z) + (direction * clearance_mm)
     if moonraker.send_gcode(f"G1 Z{primary_target:.3f}", timeout_s=25.0):
         return True
 
-    secondary_target = float(z_after_home) - (direction * clearance_mm)
+    secondary_target = float(Z_ENDSTOP_REFERENCE_Z) - (direction * clearance_mm)
     if moonraker.send_gcode(f"G1 Z{secondary_target:.3f}", timeout_s=25.0):
         return True
 
@@ -1981,9 +1997,10 @@ class MotorPositionScreen(Screen):
             self.set_status("Fehler: G90 konnte nicht gesetzt werden", "error")
             return False
 
-        requires_reference = force_rehome or not self.z_reference_known
+        requires_reference = bool(force_rehome)
         if requires_reference:
             self.set_status("Sicherheitssequenz: Z wird gehomed...", "warn")
+            z_before_home = moonraker.get_current_z_position()
             if not moonraker.send_gcode("G28 Z", timeout_s=45.0):
                 logging.error("Failed to home Z axis")
                 self.set_status("Fehler: Z konnte nicht gehomed werden", "error")
@@ -1994,13 +2011,19 @@ class MotorPositionScreen(Screen):
 
             self.z_reference_known = True
             self.set_status("Warte auf Abschluss von Z-Homing...", "warn")
-            has_feedback, _z_after_home = self.wait_for_z_feedback(timeout_s=12.0, poll_interval_s=0.2)
+            has_feedback, z_after_home = self.wait_for_z_feedback(timeout_s=12.0, poll_interval_s=0.2)
             if not has_feedback:
                 logging.error("No Z feedback received after homing")
                 self.set_status("Fehler: Keine Z-Rueckmeldung nach Z-Homing", "error")
                 self.z_is_zero = False
                 self.update_xy_home_lock_state(refresh_z_position=False)
                 return False
+            _update_z_endstop_reference(z_before_home, z_after_home)
+        elif not self.z_reference_known:
+            self.set_status("Z nicht gehomed. Bitte im Motor-Screen auf Z drücken.", "warn")
+            self.z_is_zero = False
+            self.update_xy_home_lock_state(refresh_z_position=False)
+            return False
 
         current_z = moonraker.get_current_z_position()
         if current_z is not None and abs(current_z) <= self.z_zero_tolerance:
@@ -2062,9 +2085,15 @@ class MotorPositionScreen(Screen):
                     logging.info("Axis Z homed and moved to Z0")
                     self.set_status("Z gehomed und auf 0 gefahren", "success")
             else:
+                z_before_home = moonraker.get_current_z_position()
                 if moonraker.send_gcode("G28 Z", timeout_s=45.0):
                     self.z_reference_known = True
-                    self.z_is_zero = False
+                    has_feedback, z_after_home = self.wait_for_z_feedback(timeout_s=12.0, poll_interval_s=0.2)
+                    if has_feedback:
+                        _update_z_endstop_reference(z_before_home, z_after_home)
+                        self.z_is_zero = abs(float(z_after_home)) <= self.z_zero_tolerance
+                    else:
+                        self.z_is_zero = False
                     self.update_xy_home_lock_state(refresh_z_position=True)
                     logging.info("Axis Z homed (Z safety disabled)")
                     self.set_status("Z erfolgreich gehomed", "success")
@@ -2089,9 +2118,9 @@ class MotorPositionScreen(Screen):
     def home_all_axes(self, instance):
         """Home all axes via Moonraker."""
         if self.z_safety_enabled:
-            if not self.ensure_z_homed_and_zero(force_rehome=True):
-                logging.error("Blocked X/Y homing because Z safety sequence failed")
-                self.set_status("Home gesperrt: Z-Sequenz fehlgeschlagen", "error")
+            if not self.ensure_z_homed_and_zero(force_rehome=False):
+                logging.error("Blocked X/Y homing because Z has not been explicitly homed")
+                self.set_status("Home gesperrt: zuerst Z-Button drücken", "error")
                 return
 
         if moonraker.send_gcode("G28 X Y"):
