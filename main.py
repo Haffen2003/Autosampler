@@ -1,6 +1,8 @@
 import logging
 import json
 import os
+import sqlite3
+import threading
 import time
 import traceback
 from functools import partial
@@ -244,12 +246,478 @@ ICON_DIR = os.path.join(BASE_DIR, CONFIG.get('icon_dir', 'Icons'))
 BACKGROUND_DIR = os.path.join(BASE_DIR, 'Background')
 COCKTAILS_DIR = os.path.join(BASE_DIR, 'Cocktails')
 COCKTAILS_ICON_DIR = os.path.join(COCKTAILS_DIR, '128_192')
+COCKTAIL_DB_FILE = os.path.join(BASE_DIR, 'cocktails.sqlite3')
+
+DEFAULT_COCKTAIL_RECIPES = {
+    "Black Russian": [
+        {"name": "Vodka", "amount": 50},
+        {"name": "Kahlua", "amount": 30},
+        {"name": "Wasser", "amount": 120},
+    ],
+    "Blue Lagoon": [
+        {"name": "Vodka", "amount": 40},
+        {"name": "Blue Curacao", "amount": 20},
+        {"name": "Zitronensaft", "amount": 30},
+        {"name": "Sodawasser", "amount": 100},
+    ],
+    "Caipirinha": [
+        {"name": "Cachaca", "amount": 50},
+        {"name": "Limettensaft", "amount": 30},
+        {"name": "Ginger Ale", "amount": 100},
+    ],
+    "Cosmopolitan": [
+        {"name": "Vodka", "amount": 40},
+        {"name": "Triple Sec", "amount": 20},
+        {"name": "Cranberrysaft", "amount": 30},
+        {"name": "Limettensaft", "amount": 25},
+        {"name": "Sodawasser", "amount": 80},
+    ],
+    "Electric Lemonade": [
+        {"name": "Vodka", "amount": 40},
+        {"name": "Blue Curacao", "amount": 20},
+        {"name": "Zitronensaft", "amount": 30},
+        {"name": "Sprite", "amount": 100},
+    ],
+    "Long Beach Iced Tea": [
+        {"name": "Vodka", "amount": 20},
+        {"name": "Weißer Rum", "amount": 20},
+        {"name": "Gin", "amount": 20},
+        {"name": "Tequila", "amount": 20},
+        {"name": "Triple Sec", "amount": 20},
+        {"name": "Zitronensaft", "amount": 30},
+        {"name": "Cranberrysaft", "amount": 80},
+    ],
+    "Long Island Iced Tea": [
+        {"name": "Vodka", "amount": 20},
+        {"name": "Weißer Rum", "amount": 20},
+        {"name": "Gin", "amount": 20},
+        {"name": "Tequila", "amount": 20},
+        {"name": "Triple Sec", "amount": 20},
+        {"name": "Zitronensaft", "amount": 30},
+        {"name": "Cola", "amount": 80},
+    ],
+    "Margarita": [
+        {"name": "Tequila", "amount": 50},
+        {"name": "Triple Sec", "amount": 20},
+        {"name": "Limettensaft", "amount": 30},
+        {"name": "Sodawasser", "amount": 80},
+    ],
+    "Negroni": [
+        {"name": "Gin", "amount": 40},
+        {"name": "Campari", "amount": 40},
+        {"name": "Roter Wermut", "amount": 40},
+        {"name": "Wasser", "amount": 80},
+    ],
+    "Sex on the Beach": [
+        {"name": "Vodka", "amount": 40},
+        {"name": "Pfirsichlikör", "amount": 30},
+        {"name": "Orangensaft", "amount": 50},
+        {"name": "Cranberrysaft", "amount": 50},
+    ],
+}
 
 
 def pretty_cocktail_name(filename):
     """Convert icon filename to a readable cocktail label."""
     base_name = os.path.splitext(filename)[0]
     return base_name.replace('_', ' ')
+
+
+def _normalize_ingredient_name(name):
+    return str(name).strip().replace('Weißer Rum', 'Weißer Rum')
+
+
+def _db_connect():
+    connection = sqlite3.connect(COCKTAIL_DB_FILE)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _format_amount_ml(amount_value):
+    amount_float = float(amount_value)
+    if amount_float.is_integer():
+        return str(int(amount_float))
+    return f"{amount_float:.3f}".rstrip('0').rstrip('.')
+
+
+def _slot_sort_key(position_name):
+    raw_value = str(position_name).strip()
+    try:
+        return (0, int(raw_value))
+    except ValueError:
+        return (1, raw_value.lower())
+
+
+def _normalize_special_position_key(position_key):
+    key = str(position_key).strip().lower()
+    aliases = {
+        'rinse': 'rinse_position',
+        'rinse_position': 'rinse_position',
+        'end': 'end_position',
+        'end_position': 'end_position'
+    }
+    return aliases.get(key)
+
+
+def _normalize_slot_position(position_name):
+    raw_value = str(position_name).strip()
+    if not raw_value:
+        return None
+    try:
+        numeric = int(raw_value)
+    except ValueError:
+        return None
+    if numeric < 1 or numeric > 15:
+        return None
+    return str(numeric)
+
+
+def initialize_cocktail_database():
+    os.makedirs(os.path.dirname(COCKTAIL_DB_FILE), exist_ok=True)
+    with _db_connect() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cocktails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ingredients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cocktail_ingredients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cocktail_id INTEGER NOT NULL,
+                ingredient_id INTEGER NOT NULL,
+                amount_ml REAL NOT NULL,
+                UNIQUE(cocktail_id, ingredient_id),
+                FOREIGN KEY (cocktail_id) REFERENCES cocktails(id),
+                FOREIGN KEY (ingredient_id) REFERENCES ingredients(id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ingredient_positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ingredient_id INTEGER NOT NULL UNIQUE,
+                position_name TEXT NOT NULL UNIQUE,
+                FOREIGN KEY (ingredient_id) REFERENCES ingredients(id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS special_positions (
+                key TEXT PRIMARY KEY,
+                position_name TEXT NOT NULL
+            )
+            """
+        )
+
+        for cocktail_name, recipe in DEFAULT_COCKTAIL_RECIPES.items():
+            cursor.execute("INSERT OR IGNORE INTO cocktails (name) VALUES (?)", (cocktail_name,))
+            cursor.execute("SELECT id FROM cocktails WHERE name = ?", (cocktail_name,))
+            cocktail_id = cursor.fetchone()[0]
+
+            for ingredient in recipe:
+                ingredient_name = _normalize_ingredient_name(ingredient['name'])
+                amount_ml = float(ingredient['amount'])
+
+                cursor.execute("INSERT OR IGNORE INTO ingredients (name) VALUES (?)", (ingredient_name,))
+                cursor.execute("SELECT id FROM ingredients WHERE name = ?", (ingredient_name,))
+                ingredient_id = cursor.fetchone()[0]
+
+                cursor.execute(
+                    """
+                    INSERT INTO cocktail_ingredients (cocktail_id, ingredient_id, amount_ml)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(cocktail_id, ingredient_id)
+                    DO UPDATE SET amount_ml = excluded.amount_ml
+                    """,
+                    (cocktail_id, ingredient_id, amount_ml)
+                )
+
+        connection.commit()
+
+
+def load_cocktails():
+    """Load cocktails from SQLite."""
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT c.name AS cocktail_name, i.name AS ingredient_name, ci.amount_ml AS amount_ml
+            FROM cocktails c
+            JOIN cocktail_ingredients ci ON ci.cocktail_id = c.id
+            JOIN ingredients i ON i.id = ci.ingredient_id
+            ORDER BY c.name COLLATE NOCASE, ci.id ASC, i.name COLLATE NOCASE
+            """
+        ).fetchall()
+
+    cocktails = {}
+    for row in rows:
+        cocktails.setdefault(row['cocktail_name'], []).append({
+            'name': row['ingredient_name'],
+            'amount': float(row['amount_ml'])
+        })
+    return cocktails
+
+
+def save_cocktails(data):
+    """Persist cocktails to SQLite for compatibility with existing UI."""
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        cursor = connection.cursor()
+        for cocktail_name, ingredients in (data or {}).items():
+            if not cocktail_name:
+                continue
+
+            cursor.execute("INSERT OR IGNORE INTO cocktails (name) VALUES (?)", (cocktail_name,))
+            cursor.execute("SELECT id FROM cocktails WHERE name = ?", (cocktail_name,))
+            cocktail_id = cursor.fetchone()[0]
+
+            for ingredient in ingredients:
+                ingredient_name = _normalize_ingredient_name(ingredient.get('name', ''))
+                if not ingredient_name:
+                    continue
+
+                amount_ml = float(ingredient.get('amount', 0))
+                cursor.execute("INSERT OR IGNORE INTO ingredients (name) VALUES (?)", (ingredient_name,))
+                cursor.execute("SELECT id FROM ingredients WHERE name = ?", (ingredient_name,))
+                ingredient_id = cursor.fetchone()[0]
+                cursor.execute(
+                    """
+                    INSERT INTO cocktail_ingredients (cocktail_id, ingredient_id, amount_ml)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(cocktail_id, ingredient_id)
+                    DO UPDATE SET amount_ml = excluded.amount_ml
+                    """,
+                    (cocktail_id, ingredient_id, amount_ml)
+                )
+        connection.commit()
+
+
+def get_cocktail_recipe(cocktail_name):
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                c.id AS cocktail_id,
+                c.name AS cocktail_name,
+                i.id AS ingredient_id,
+                i.name AS ingredient_name,
+                ci.amount_ml AS amount_ml,
+                ip.position_name AS position_name
+            FROM cocktails c
+            JOIN cocktail_ingredients ci ON ci.cocktail_id = c.id
+            JOIN ingredients i ON i.id = ci.ingredient_id
+            LEFT JOIN ingredient_positions ip ON ip.ingredient_id = i.id
+            WHERE c.name = ?
+            ORDER BY ci.id ASC, i.name COLLATE NOCASE
+            """,
+            (cocktail_name,)
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def get_all_ingredient_positions():
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT i.name AS ingredient_name, ip.position_name AS position_name
+            FROM ingredient_positions ip
+            JOIN ingredients i ON i.id = ip.ingredient_id
+            ORDER BY ip.position_name COLLATE NOCASE
+            """
+        ).fetchall()
+    return {row['ingredient_name']: row['position_name'] for row in rows}
+
+
+def set_ingredient_position(ingredient_name, position_name):
+    normalized_name = _normalize_ingredient_name(ingredient_name)
+    normalized_position = str(position_name).strip()
+    if not normalized_name or not normalized_position:
+        return False
+
+    special_positions = get_special_positions()
+    if normalized_position in (special_positions.get('rinse_position'), special_positions.get('end_position')):
+        return False
+
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        cursor = connection.cursor()
+        cursor.execute("SELECT id FROM ingredients WHERE name = ?", (normalized_name,))
+        ingredient_row = cursor.fetchone()
+        if ingredient_row is None:
+            return False
+
+        ingredient_id = int(ingredient_row['id'])
+        cursor.execute("DELETE FROM ingredient_positions WHERE position_name = ?", (normalized_position,))
+        cursor.execute("DELETE FROM ingredient_positions WHERE ingredient_id = ?", (ingredient_id,))
+        cursor.execute(
+            "INSERT INTO ingredient_positions (ingredient_id, position_name) VALUES (?, ?)",
+            (ingredient_id, normalized_position)
+        )
+        connection.commit()
+    return True
+
+
+def clear_ingredient_position(ingredient_name):
+    normalized_name = _normalize_ingredient_name(ingredient_name)
+    if not normalized_name:
+        return False
+
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            DELETE FROM ingredient_positions
+            WHERE ingredient_id = (
+                SELECT id FROM ingredients WHERE name = ?
+            )
+            """,
+            (normalized_name,)
+        )
+        changed = cursor.rowcount > 0
+        connection.commit()
+    return changed
+
+
+def get_missing_ingredients_for_cocktail(cocktail_name):
+    missing = []
+    for row in get_cocktail_recipe(cocktail_name):
+        if not row.get('position_name'):
+            missing.append(row['ingredient_name'])
+    return missing
+
+
+def cocktail_is_available(cocktail_name):
+    recipe = get_cocktail_recipe(cocktail_name)
+    return bool(recipe) and all(row.get('position_name') for row in recipe)
+
+
+def get_special_positions():
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT key, position_name
+            FROM special_positions
+            """
+        ).fetchall()
+    return {row['key']: row['position_name'] for row in rows}
+
+
+def get_special_position(position_key):
+    normalized_key = _normalize_special_position_key(position_key)
+    if not normalized_key:
+        return None
+    return get_special_positions().get(normalized_key)
+
+
+def clear_special_position(position_key):
+    normalized_key = _normalize_special_position_key(position_key)
+    if not normalized_key:
+        return False
+
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM special_positions WHERE key = ?", (normalized_key,))
+        changed = cursor.rowcount > 0
+        connection.commit()
+    return changed
+
+
+def set_special_position(position_key, position_name):
+    normalized_key = _normalize_special_position_key(position_key)
+    normalized_position = _normalize_slot_position(position_name)
+    if not normalized_key or not normalized_position:
+        return False
+
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        connection.execute(
+            "DELETE FROM ingredient_positions WHERE position_name = ?",
+            (normalized_position,)
+        )
+        connection.execute(
+            "DELETE FROM special_positions WHERE position_name = ? AND key != ?",
+            (normalized_position, normalized_key)
+        )
+        connection.execute(
+            """
+            INSERT INTO special_positions (key, position_name)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET position_name = excluded.position_name
+            """,
+            (normalized_key, normalized_position)
+        )
+        connection.commit()
+    return True
+
+
+def get_cocktail_start_requirements(cocktail_name):
+    recipe = get_cocktail_recipe(cocktail_name)
+    missing_ingredients = []
+    for row in recipe:
+        if not row.get('position_name'):
+            missing_ingredients.append(row['ingredient_name'])
+
+    rinse_position = get_special_position('rinse_position')
+    end_position = get_special_position('end_position')
+
+    missing_reasons = []
+    if not recipe:
+        missing_reasons.append("Rezept nicht gefunden")
+    if missing_ingredients:
+        missing_reasons.append("Fehlende Zutaten-Positionen: " + ", ".join(missing_ingredients))
+    if not rinse_position:
+        missing_reasons.append("Rinse Position fehlt")
+    if not end_position:
+        missing_reasons.append("Endposition fehlt")
+
+    return {
+        'recipe_found': bool(recipe),
+        'missing_ingredients': missing_ingredients,
+        'rinse_position': rinse_position,
+        'end_position': end_position,
+        'missing_reasons': missing_reasons,
+        'ready': len(missing_reasons) == 0
+    }
+
+
+def build_cocktail_dispense_plan(cocktail_name):
+    recipe = get_cocktail_recipe(cocktail_name)
+    if not recipe:
+        return []
+
+    if any(not row.get('position_name') for row in recipe):
+        return []
+
+    plan = []
+    for row in recipe:
+        plan.append({
+            'cocktail_name': row['cocktail_name'],
+            'ingredient_name': row['ingredient_name'],
+            'amount_ml': float(row['amount_ml']),
+            'position_name': row['position_name']
+        })
+    return plan
 
 
 def preferred_ui_font():
@@ -370,6 +838,7 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.image import Image
 from kivy.uix.switch import Switch
 from kivy.uix.checkbox import CheckBox
+from kivy.uix.progressbar import ProgressBar
 from kivy.uix.popup import Popup
 from kivy.properties import NumericProperty
 from kivy.clock import Clock
@@ -386,31 +855,6 @@ class Button(KivyButton):
             self.x - padding <= x <= self.right + padding and
             self.y - padding <= y <= self.top + padding
         )
-
-data_file = "cocktails.json"
-
-def save_cocktails(data):
-    """Save cocktails to JSON file with error handling."""
-    try:
-        with open(data_file, "w") as f:
-            json.dump(data, f, indent=4)
-        logging.info(f'Cocktails saved to {data_file}')
-    except IOError as e:
-        logging.error(f'Error saving cocktails: {e}')
-
-def load_cocktails():
-    """Load cocktails from JSON file with error handling."""
-    if os.path.exists(data_file):
-        try:
-            with open(data_file, "r") as f:
-                data = json.load(f)
-                logging.info(f'Loaded {len(data)} cocktails')
-                return data
-        except json.JSONDecodeError:
-            logging.error(f'{data_file} is corrupted, returning empty dict')
-        except IOError as e:
-            logging.error(f'Error reading cocktails: {e}')
-    return {}
 
 class CocktailInputScreen(Screen):
     def __init__(self, **kwargs):
@@ -675,7 +1119,7 @@ class CircleButton(Widget):
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
             if callable(self.callback):
-                self.callback(self)
+                self.callback(self, is_double_tap=bool(getattr(touch, 'is_double_tap', False)))
             return True
         return super().on_touch_down(touch)
 
@@ -694,8 +1138,10 @@ class PreparationScreen(Screen):
         self.cocktail_data = load_cocktails()
         self.active_color = None
         self.active_ingredient_name = None
+        self.active_special_position_key = None
         self.assigned_ingredients = set()
         self._loading_ingredients = False  # Race condition fix
+        self.assignment_color = [0.2, 0.55, 0.85, 1]
 
         self.layout = FloatLayout()
 
@@ -719,6 +1165,22 @@ class PreparationScreen(Screen):
         )
         self.spinner.bind(text=self.show_ingredients)
 
+        special_row = BoxLayout(orientation='horizontal', size_hint=(None, None), height=44, spacing=8)
+        special_row.width = min(Window.width * 0.9, 600)
+        self.rinse_position_btn = Button(text="Rinse setzen", size_hint=(None, 1), width=160, font_size=15)
+        self.end_position_btn = Button(text="Ende setzen", size_hint=(None, 1), width=160, font_size=15)
+        self.rinse_position_btn.bind(on_press=lambda _btn: self.set_special_position_mode('rinse_position'))
+        self.end_position_btn.bind(on_press=lambda _btn: self.set_special_position_mode('end_position'))
+        special_row.add_widget(self.rinse_position_btn)
+        special_row.add_widget(self.end_position_btn)
+        self.rinse_position_label = Label(text="Rinse: -", halign='left', valign='middle', font_size=14)
+        self.rinse_position_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        self.end_position_label = Label(text="Ende: -", halign='left', valign='middle', font_size=14)
+        self.end_position_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        special_row.add_widget(self.rinse_position_label)
+        special_row.add_widget(self.end_position_label)
+        self.special_row = special_row
+
         self.ingredients_area = BoxLayout(orientation='vertical', size_hint_y=None, spacing=10)
         self.ingredients_area.bind(minimum_height=self.ingredients_area.setter('height'))
 
@@ -732,11 +1194,114 @@ class PreparationScreen(Screen):
         # Kreise unten mittig
         circle_width = min(Window.width * 0.9, 600)
         self.slot_area = GridLayout(cols=5, spacing=[8, 8], size_hint=(None, None), size=(circle_width, circle_width * 0.5))
-        self.slot_area.pos_hint = {'center_x': 0.5, 'y': 0.05}
+
+        bottom_height = self.special_row.height + 10 + self.slot_area.height
+        self.bottom_area = BoxLayout(
+            orientation='vertical',
+            spacing=10,
+            size_hint=(None, None),
+            size=(circle_width, bottom_height),
+            pos_hint={'center_x': 0.5, 'y': 0.05}
+        )
+
+        self.bottom_area.add_widget(self.special_row)
+        self.bottom_area.add_widget(self.slot_area)
         self.draw_circles()
-        self.layout.add_widget(self.slot_area)
+        self.layout.add_widget(self.bottom_area)
 
         self.add_widget(self.layout)
+        self.refresh_slot_assignments()
+        self.refresh_special_positions_ui()
+
+    def on_pre_enter(self, *args):
+        self.cocktail_data = load_cocktails()
+        self.spinner.values = list(self.cocktail_data.keys()) or ["Keine Cocktails verfügbar"]
+        self.refresh_slot_assignments()
+        self.refresh_special_positions_ui()
+        return super().on_pre_enter(*args)
+
+    def refresh_special_positions_ui(self):
+        positions = get_special_positions()
+        rinse_position = positions.get('rinse_position')
+        end_position = positions.get('end_position')
+        self.rinse_position_label.text = f"Rinse: {rinse_position}" if rinse_position else "Rinse: -"
+        self.end_position_label.text = f"Ende: {end_position}" if end_position else "Ende: -"
+        self._update_special_mode_visuals()
+
+    def _update_special_mode_visuals(self):
+        rinse_active = self.active_special_position_key == 'rinse_position'
+        end_active = self.active_special_position_key == 'end_position'
+        self.rinse_position_btn.background_color = (0.2, 0.6, 0.95, 1) if rinse_active else (1, 1, 1, 1)
+        self.end_position_btn.background_color = (0.2, 0.6, 0.95, 1) if end_active else (1, 1, 1, 1)
+
+    def set_special_position_mode(self, position_key):
+        normalized_key = _normalize_special_position_key(position_key)
+        if not normalized_key:
+            return
+
+        self.active_color = None
+        self.active_ingredient_name = None
+        self.reset_stift_buttons()
+
+        if self.active_special_position_key == normalized_key:
+            self.active_special_position_key = None
+        else:
+            self.active_special_position_key = normalized_key
+            selected_slot = get_special_position(normalized_key)
+            self._highlight_selected_slot(selected_slot)
+
+        self._update_special_mode_visuals()
+
+    def _highlight_selected_slot(self, slot_index):
+        slot_value = str(slot_index).strip() if slot_index is not None else ""
+        for btn in self.slot_area.children:
+            if not isinstance(btn, CircleButton):
+                continue
+            btn.set_selected(str(btn.index) == slot_value)
+
+    def _clear_selected_slot_highlight(self):
+        for btn in self.slot_area.children:
+            if isinstance(btn, CircleButton):
+                btn.set_selected(False)
+
+    def refresh_slot_assignments(self):
+        assignments = get_all_ingredient_positions()
+        assignments_by_slot = {str(position): ingredient for ingredient, position in assignments.items()}
+        special_positions = get_special_positions()
+        rinse_slot = str(special_positions.get('rinse_position', '')).strip()
+        end_slot = str(special_positions.get('end_position', '')).strip()
+
+        for btn in self.slot_area.children:
+            if not isinstance(btn, CircleButton):
+                continue
+
+            slot_value = str(btn.index)
+            ingredient_name = assignments_by_slot.get(slot_value)
+            is_rinse = slot_value == rinse_slot
+            is_end = slot_value == end_slot
+
+            if is_rinse or is_end:
+                marker_lines = []
+                if is_rinse:
+                    marker_lines.append("Rinse")
+                if is_end:
+                    marker_lines.append("Ende")
+                if ingredient_name:
+                    marker_lines.append(ingredient_name)
+                btn.assigned_ingredient = ingredient_name
+                btn.label.text = "\n".join(marker_lines)
+                btn.color_instruction.rgb = [0.9, 0.52, 0.22]
+                btn.set_selected(False)
+                continue
+
+            if ingredient_name:
+                btn.assign_ingredient(ingredient_name, self.assignment_color)
+                btn.set_selected(False)
+                continue
+
+            btn.assigned_ingredient = None
+            btn.label.text = ""
+            btn.color_instruction.rgb = btn.default_color[:3]
 
     def show_ingredients(self, spinner, text):
         """Load ingredients with race condition protection."""
@@ -753,6 +1318,7 @@ class PreparationScreen(Screen):
             self.active_color = None
             self.active_ingredient_name = None
             self.cocktail_data = load_cocktails()
+            assignments = get_all_ingredient_positions()
 
             # Clear existing widgets to prevent duplicates
             self.ingredients_area.clear_widgets()
@@ -798,7 +1364,10 @@ class PreparationScreen(Screen):
                     bg_box.add_widget(activate_btn)
 
                     label = Label(
-                        text=f"{i['name']}: {i['amount']} ml",
+                        text=(
+                            f"{i['name']}: {_format_amount_ml(i['amount'])} ml"
+                            + (f"  |  Position {assignments[i['name']]}" if i['name'] in assignments else "")
+                        ),
                         size_hint_x=1,
                         halign='left',
                         valign='middle',
@@ -816,6 +1385,8 @@ class PreparationScreen(Screen):
                     )
                     delete_btn.row = row
                     delete_btn.bind(on_press=self.remove_row)
+
+                    row.info_label = label
 
                     row.add_widget(bg_box)
                     row.add_widget(label)
@@ -835,17 +1406,18 @@ class PreparationScreen(Screen):
 
         ingredient_name = getattr(row, 'ingredient_name', None)
         if ingredient_name:
-            for btn in self.slot_area.children:
-                if isinstance(btn, CircleButton) and btn.assigned_ingredient == ingredient_name:
-                    btn.assigned_ingredient = None
-                    btn.label.text = ""
-                    btn.color_instruction.rgb = btn.default_color[:3]
-
-        self.ingredients_area.remove_widget(row)
+            clear_ingredient_position(ingredient_name)
+            self.refresh_slot_assignments()
+            current_cocktail = self.spinner.text
+            if current_cocktail and current_cocktail not in ("Cocktail auswählen", "Keine Cocktails verfügbar"):
+                self.show_ingredients(self.spinner, current_cocktail)
 
     def set_active_color(self, button, name, color):
+        self.active_special_position_key = None
+        self._update_special_mode_visuals()
         self.active_color = color
         self.active_ingredient_name = name
+        self._highlight_selected_slot(get_all_ingredient_positions().get(name))
 
         # Alle Stifte zurücksetzen
         for row in self.ingredients_area.children:
@@ -861,20 +1433,71 @@ class PreparationScreen(Screen):
             circle = CircleButton(index=i + 1, callback=self.select_circle)
             self.slot_area.add_widget(circle)
 
-    def select_circle(self, instance):
+    def _clear_slot_assignment(self, slot_index):
+        slot_value = str(slot_index).strip()
+        changed = False
+
+        special_positions = get_special_positions()
+        if special_positions.get('rinse_position') == slot_value:
+            changed = clear_special_position('rinse_position') or changed
+        if special_positions.get('end_position') == slot_value:
+            changed = clear_special_position('end_position') or changed
+
+        ingredient_positions = get_all_ingredient_positions()
+        for ingredient_name, assigned_slot in ingredient_positions.items():
+            if str(assigned_slot).strip() == slot_value:
+                changed = clear_ingredient_position(ingredient_name) or changed
+                break
+
+        if changed:
+            self.refresh_slot_assignments()
+            self.refresh_special_positions_ui()
+            current_cocktail = self.spinner.text
+            if current_cocktail and current_cocktail not in ("Cocktail auswählen", "Keine Cocktails verfügbar"):
+                self.show_ingredients(self.spinner, current_cocktail)
+
+            if self.active_special_position_key:
+                self._highlight_selected_slot(get_special_position(self.active_special_position_key))
+            elif self.active_ingredient_name:
+                self._highlight_selected_slot(get_all_ingredient_positions().get(self.active_ingredient_name))
+            else:
+                self._clear_selected_slot_highlight()
+
+        return changed
+
+    def select_circle(self, instance, is_double_tap=False):
+        if is_double_tap:
+            if self._clear_slot_assignment(instance.index):
+                logging.info(f"Slot {instance.index} per Doppeltipp freigegeben")
+            return
+
+        if self.active_special_position_key:
+            if not set_special_position(self.active_special_position_key, instance.index):
+                logging.error(f"Konnte Spezialposition '{self.active_special_position_key}' nicht speichern")
+                return
+
+            logging.info(f"Spezialposition '{self.active_special_position_key}' auf Slot {instance.index} gesetzt")
+            self.active_special_position_key = None
+            self.refresh_special_positions_ui()
+            self._clear_selected_slot_highlight()
+            return
+
         if not self.active_color or not self.active_ingredient_name:
             return
 
-        for btn in self.slot_area.children:
-            if isinstance(btn, CircleButton) and btn.assigned_ingredient == self.active_ingredient_name:
-                logging.warning('Diese Zutat wurde bereits zugewiesen.')
-                return
+        if not set_ingredient_position(self.active_ingredient_name, instance.index):
+            logging.error(f"Konnte Zutat '{self.active_ingredient_name}' nicht zuweisen")
+            return
 
-        instance.assign_ingredient(self.active_ingredient_name, self.active_color)
+        self.refresh_slot_assignments()
+        current_cocktail = self.spinner.text
+        if current_cocktail and current_cocktail not in ("Cocktail auswählen", "Keine Cocktails verfügbar"):
+            self.show_ingredients(self.spinner, current_cocktail)
         logging.info(f"Zutat '{self.active_ingredient_name}' zu Slot {instance.index} zugewiesen.")
         self.active_color = None
         self.active_ingredient_name = None
         self.reset_stift_buttons()
+        self._clear_selected_slot_highlight()
 
     def reset_stift_buttons(self):
         for row in self.ingredients_area.children:
@@ -1169,7 +1792,9 @@ class MotorPositionScreen(Screen):
             circle = CircleButton(index=i + 1, callback=self.select_circle)
             self.slot_area.add_widget(circle)
 
-    def select_circle(self, instance):
+    def select_circle(self, instance, is_double_tap=False):
+        if is_double_tap:
+            return
         for btn in self.slot_area.children:
             if isinstance(btn, CircleButton):
                 btn.set_selected(False)
@@ -2638,6 +3263,7 @@ class HomeScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.ui_font = preferred_ui_font()
+        self.last_dispense_plan = []
 
         root = BoxLayout(orientation='vertical', padding=[16, 12, 16, 12], spacing=10)
 
@@ -2654,7 +3280,7 @@ class HomeScreen(Screen):
         root.add_widget(title)
 
         subtitle = Label(
-            text="Tippe auf ein Rezept im Cocktail-Tab, hier siehst du alle verfügbaren Drinks.",
+            text="Ausgegraute Cocktails haben fehlende Zutaten-Zuordnungen. Start im Popup nur mit Zutaten + Rinse + Ende.",
             size_hint_y=None,
             height=28,
             font_size=16,
@@ -2694,6 +3320,351 @@ class HomeScreen(Screen):
         self.populate_cocktail_icons()
         return super().on_pre_enter(*args)
 
+    def _set_status(self, message):
+        self.status_label.text = message
+        logging.info(f"Home screen: {message}")
+
+    def _get_motor_screen(self):
+        if not self.manager:
+            return None
+        try:
+            return self.manager.get_screen("motor")
+        except Exception:
+            return None
+
+    def _get_syringe_screen(self):
+        if not self.manager:
+            return None
+        try:
+            return self.manager.get_screen("syringe")
+        except Exception:
+            return None
+
+    def _send_gcode(self, command, error_message, timeout_s=None):
+        if moonraker.send_gcode(command, timeout_s=timeout_s):
+            return True
+        self._set_status(error_message)
+        logging.error(f"Cocktail command failed: {command}")
+        return False
+
+    def _mm_for_ml(self, ml_value):
+        global SYRINGE_CALIBRATION_DATA
+        if not isinstance(SYRINGE_CALIBRATION_DATA, dict):
+            return None
+        mm_per_ml = SYRINGE_CALIBRATION_DATA.get('mm_per_ml')
+        if mm_per_ml is None:
+            return None
+        try:
+            mm_per_ml = float(mm_per_ml)
+        except (TypeError, ValueError):
+            return None
+        if mm_per_ml <= 0:
+            return None
+        return float(ml_value) * mm_per_ml
+
+    def _load_slot_positions(self):
+        for filename in ("position.json", "positions.json"):
+            if not os.path.exists(filename):
+                continue
+            try:
+                with open(filename, "r") as handle:
+                    data = json.load(handle)
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                logging.error(f"{filename} is corrupted")
+            except Exception as exc:
+                logging.error(f"Error reading {filename}: {exc}")
+        return {}
+
+    def _move_xy_to_slot(self, slot_index):
+        motor_screen = self._get_motor_screen()
+        if motor_screen is None:
+            self._set_status("Fehler: Motor-Screen nicht verfügbar")
+            return False
+
+        positions = self._load_slot_positions()
+        key = str(slot_index).strip()
+        raw = positions.get(key, {}) if isinstance(positions.get(key, {}), dict) else {}
+        if not raw:
+            self._set_status(f"Fehler: Position {key} fehlt in positions.json")
+            return False
+
+        try:
+            x_value = float(str(raw.get("x", "")).replace(',', '.'))
+            y_value = float(str(raw.get("y", "")).replace(',', '.'))
+            speed_value = float(str(raw.get("speed", motor_screen.default_slot_speed)).replace(',', '.'))
+            speed_value = motor_screen._clamp_speed(speed_value)
+        except (AttributeError, TypeError, ValueError):
+            self._set_status(f"Fehler: Position {key} enthält ungültige Werte")
+            return False
+
+        if motor_screen.z_safety_enabled and not motor_screen.ensure_z_homed_and_zero(force_rehome=False):
+            self._set_status("Fehler: XY gesperrt, Z-Sicherheit fehlgeschlagen")
+            return False
+
+        if not self._send_gcode("G90", "Fehler: G90 konnte nicht gesetzt werden"):
+            return False
+        if not self._send_gcode(
+            f"G1 F{motor_screen._fmt_number(speed_value)}",
+            "Fehler: XY-Geschwindigkeit konnte nicht gesetzt werden"
+        ):
+            return False
+        return self._send_gcode(
+            f"G1 X{motor_screen._fmt_number(x_value)} Y{motor_screen._fmt_number(y_value)}",
+            f"Fehler: XY-Fahrt zu Position {key} fehlgeschlagen"
+        )
+
+    def _run_draw_sequence_ml(self, ml_value):
+        motor_screen = self._get_motor_screen()
+        syringe_screen = self._get_syringe_screen()
+        if motor_screen is None or syringe_screen is None:
+            self._set_status("Fehler: Motor- oder Spritzen-Screen nicht verfügbar")
+            return False
+
+        draw_mm = self._mm_for_ml(ml_value)
+        if draw_mm is None or draw_mm <= 0:
+            self._set_status("Fehler: Kalibration fehlt oder ist ungültig")
+            return False
+
+        def _z_to_zero():
+            if not motor_screen.ensure_z_homed_and_zero(force_rehome=False):
+                self._set_status("Fehler: Z konnte nicht auf 0 gebracht werden")
+                return False
+            return True
+
+        def _z_to_endstop():
+            if not self._send_gcode("G90", "Fehler: G90 konnte nicht gesetzt werden"):
+                return False
+            return self._send_gcode("G28 Z", "Fehler: Z konnte nicht auf Endschalter fahren", timeout_s=45.0)
+
+        return run_syringe_job(
+            syringe_screen=syringe_screen,
+            draw_mm=draw_mm,
+            status_fn=self._set_status,
+            z_to_zero_fn=_z_to_zero,
+            z_to_endstop_fn=_z_to_endstop
+        )
+
+    def _estimate_ingredient_step_seconds(self, amount_ml):
+        draw_mm = self._mm_for_ml(amount_ml)
+        if draw_mm is None or draw_mm <= 0:
+            draw_mm = 40.0
+
+        sequence = {}
+        if isinstance(SYRINGE_CALIBRATION_DATA, dict):
+            seq_raw = SYRINGE_CALIBRATION_DATA.get('sequence', {})
+            if isinstance(seq_raw, dict):
+                sequence = seq_raw
+
+        defaults = default_syringe_calibration_data().get('sequence', {})
+        try:
+            pre_air_mm = float(sequence.get('pre_air_mm', defaults.get('pre_air_mm', 10.0)))
+        except (TypeError, ValueError):
+            pre_air_mm = float(defaults.get('pre_air_mm', 10.0))
+
+        try:
+            post_air_mm = float(sequence.get('post_air_mm', defaults.get('post_air_mm', 2.0)))
+        except (TypeError, ValueError):
+            post_air_mm = float(defaults.get('post_air_mm', 2.0))
+
+        syringe_speed = max(0.1, float(CONFIG.get('syringe_speed_mm_s', 2.0)))
+        dwell_s = max(0.0, float(CONFIG.get('calibration_dwell_s', 10.0)))
+
+        syringe_time = (abs(pre_air_mm) + abs(draw_mm) + abs(post_air_mm)) / syringe_speed
+        z_home_and_lift_s = 16.0
+        return syringe_time + dwell_s + z_home_and_lift_s
+
+    def _estimate_dispense_seconds(self, amount_ml):
+        draw_mm = self._mm_for_ml(amount_ml)
+        if draw_mm is None or draw_mm <= 0:
+            draw_mm = 40.0
+
+        sequence = default_syringe_calibration_data().get('sequence', {})
+        if isinstance(SYRINGE_CALIBRATION_DATA, dict):
+            seq_raw = SYRINGE_CALIBRATION_DATA.get('sequence', {})
+            if isinstance(seq_raw, dict):
+                sequence = seq_raw
+
+        try:
+            pre_air_mm = float(sequence.get('pre_air_mm', 10.0))
+        except (TypeError, ValueError):
+            pre_air_mm = 10.0
+
+        try:
+            post_air_mm = float(sequence.get('post_air_mm', 2.0))
+        except (TypeError, ValueError):
+            post_air_mm = 2.0
+
+        syringe_speed = max(0.1, float(CONFIG.get('syringe_speed_mm_s', 2.0)))
+        output_path_mm = abs(pre_air_mm) + abs(draw_mm) + abs(post_air_mm)
+        syringe_output_speed_factor = max(0.05, float(CONFIG.get('syringe_output_speed_factor', 0.5)))
+        effective_output_speed = syringe_speed * syringe_output_speed_factor
+        output_time_s = output_path_mm / max(0.1, effective_output_speed)
+
+        z_zero_overhead_s = 4.0
+        return output_time_s + z_zero_overhead_s
+
+    def _slot_pose(self, slot_positions, slot_index):
+        key = str(slot_index).strip()
+        raw = slot_positions.get(key, {}) if isinstance(slot_positions.get(key, {}), dict) else {}
+        if not raw:
+            return None
+        try:
+            x_value = float(str(raw.get('x', '')).replace(',', '.'))
+            y_value = float(str(raw.get('y', '')).replace(',', '.'))
+            speed_value = float(str(raw.get('speed', 8000.0)).replace(',', '.'))
+        except (TypeError, ValueError):
+            return None
+        return {
+            'x': x_value,
+            'y': y_value,
+            'speed_mm_min': max(1.0, speed_value)
+        }
+
+    def _estimate_xy_seconds_between_slots(self, slot_positions, from_slot, to_slot):
+        from_pose = self._slot_pose(slot_positions, from_slot)
+        to_pose = self._slot_pose(slot_positions, to_slot)
+        if not to_pose:
+            return 4.0
+        if not from_pose:
+            return 4.0
+
+        dx = to_pose['x'] - from_pose['x']
+        dy = to_pose['y'] - from_pose['y']
+        distance_mm = (dx * dx + dy * dy) ** 0.5
+        speed_mm_s = max(1.0, float(to_pose['speed_mm_min']) / 60.0)
+        command_overhead_s = 0.35
+        return command_overhead_s + (distance_mm / speed_mm_s)
+
+    def build_cocktail_phase_estimates(self, plan, end_position):
+        if not plan:
+            return []
+
+        slot_positions = self._load_slot_positions()
+        phases = []
+        previous_slot = None
+
+        for step in plan:
+            ingredient_slot = str(step.get('position_name', '')).strip()
+            amount_ml = float(step.get('amount_ml', 0.0))
+
+            phases.append(max(0.5, self._estimate_xy_seconds_between_slots(slot_positions, previous_slot, ingredient_slot)))
+            phases.append(max(1.0, self._estimate_ingredient_step_seconds(amount_ml)))
+            phases.append(max(0.5, self._estimate_xy_seconds_between_slots(slot_positions, ingredient_slot, end_position)))
+            phases.append(max(1.0, self._estimate_dispense_seconds(amount_ml)))
+
+            previous_slot = end_position
+
+        return phases
+
+    def _dispense_current_load_to_end(self, context_name, end_position):
+        self._set_status(f"{context_name}: fahre zur Endposition {end_position} für Ausgabe")
+        if not self._move_xy_to_slot(end_position):
+            return False
+
+        syringe_screen = self._get_syringe_screen()
+        if syringe_screen is None:
+            self._set_status("Fehler: Spritzen-Screen nicht verfügbar")
+            return False
+
+        self._set_status(f"{context_name}: Ausgabe an Endposition {end_position}")
+        if not syringe_screen.home_syringe(None):
+            self._set_status("Fehler: Ausgabe an Endposition fehlgeschlagen")
+            return False
+
+        motor_screen = self._get_motor_screen()
+        if motor_screen is None:
+            self._set_status("Fehler: Motor-Screen nicht verfügbar")
+            return False
+
+        if not motor_screen.ensure_z_homed_and_zero(force_rehome=False):
+            self._set_status("Fehler: Z konnte nach Ausgabe nicht auf 0 gebracht werden")
+            return False
+
+        return True
+
+    def start_cocktail(self, cocktail_name, progress_fn=None):
+        requirements = get_cocktail_start_requirements(cocktail_name)
+        if not requirements['ready']:
+            self._set_status("Cocktail nicht startbar: " + " | ".join(requirements['missing_reasons']))
+            return False
+
+        plan = build_cocktail_dispense_plan(cocktail_name)
+        if not plan:
+            self._set_status("Fehler: Rezept oder Positionen konnten nicht geladen werden")
+            return False
+
+        end_position = requirements['end_position']
+
+        self.last_dispense_plan = plan
+        phase_estimates = self.build_cocktail_phase_estimates(plan, end_position)
+        total_phases = max(1, len(phase_estimates))
+        done_phases = 0
+
+        def _report_progress(message, completed):
+            completed_clamped = max(0, min(int(completed), total_phases))
+            remaining_s = sum(phase_estimates[completed_clamped:]) if phase_estimates else 0.0
+            if callable(progress_fn):
+                try:
+                    progress_fn(message, int(completed_clamped), int(total_phases), float(remaining_s))
+                except Exception:
+                    logging.exception("Cocktail progress callback failed")
+
+        _report_progress(f"{cocktail_name}: Start", 0)
+
+        for step in plan:
+            position_name = step['position_name']
+            ingredient_name = step['ingredient_name']
+            amount_ml = step['amount_ml']
+            self._set_status(f"{cocktail_name}: fahre zu Position {position_name} für {ingredient_name}")
+            _report_progress(f"Fahre zu {ingredient_name} (Pos {position_name})", done_phases)
+            if not self._move_xy_to_slot(position_name):
+                return False
+            done_phases += 1
+            _report_progress(f"Position {position_name} erreicht", done_phases)
+
+            self._set_status(
+                f"{cocktail_name}: ziehe {_format_amount_ml(amount_ml)} ml {ingredient_name} an Position {position_name} auf"
+            )
+            _report_progress(f"Ziehe {_format_amount_ml(amount_ml)} ml {ingredient_name} auf", done_phases)
+            if not self._run_draw_sequence_ml(amount_ml):
+                return False
+            done_phases += 1
+            _report_progress(f"{ingredient_name} aufgenommen", done_phases)
+
+            _report_progress(f"Bringe {ingredient_name} zur Endposition", done_phases)
+            if not self._dispense_current_load_to_end(cocktail_name, end_position):
+                return False
+            done_phases += 2
+            _report_progress(f"{ingredient_name} an Endposition ausgegeben", done_phases)
+
+        self._set_status(f"{cocktail_name}: Reihenfolge vollständig abgearbeitet")
+        _report_progress(f"{cocktail_name} abgeschlossen", total_phases)
+        return True
+
+    def run_rinse_cycle(self, rinse_ml=50.0):
+        rinse_position = get_special_position('rinse_position')
+        end_position = get_special_position('end_position')
+
+        if not rinse_position or not end_position:
+            self._set_status("Spülen nicht möglich: Rinse Position oder Endposition fehlt")
+            return False
+
+        self._set_status(f"Spülen: fahre zur Rinse Position {rinse_position}")
+        if not self._move_xy_to_slot(rinse_position):
+            return False
+
+        self._set_status(f"Spülen: ziehe {_format_amount_ml(rinse_ml)} ml Spüllösung auf")
+        if not self._run_draw_sequence_ml(rinse_ml):
+            return False
+
+        if not self._dispense_current_load_to_end("Spülen", end_position):
+            return False
+
+        self._set_status("Spülen abgeschlossen. System bereit für nächsten Cocktail")
+        return True
+
     def populate_cocktail_icons(self):
         self.grid.clear_widgets()
 
@@ -2710,6 +3681,8 @@ class HomeScreen(Screen):
             return
 
         for icon_file in icon_files:
+            cocktail_name = pretty_cocktail_name(icon_file)
+            is_available = cocktail_is_available(cocktail_name)
             card = BoxLayout(
                 orientation='vertical',
                 size_hint=(None, None),
@@ -2729,14 +3702,17 @@ class HomeScreen(Screen):
                 background_color=(1, 1, 1, 1),
                 border=(0, 0, 0, 0)
             )
-            cocktail_button.bind(on_release=partial(self.on_cocktail_icon_pressed, cocktail_name=pretty_cocktail_name(icon_file)))
+            cocktail_button.disabled = not is_available
+            cocktail_button.opacity = 1.0 if is_available else 0.32
+            if is_available:
+                cocktail_button.bind(on_release=partial(self.on_cocktail_icon_pressed, cocktail_name=cocktail_name))
 
             name_label = Label(
-                text=pretty_cocktail_name(icon_file),
+                text=cocktail_name,
                 size_hint_y=None,
                 height=36,
                 font_size=16,
-                color=[1, 1, 1, 1],
+                color=[1, 1, 1, 1] if is_available else [0.55, 0.55, 0.55, 1],
                 halign='center',
                 valign='middle'
             )
@@ -2751,7 +3727,336 @@ class HomeScreen(Screen):
         self.status_label.text = f"{len(icon_files)} Cocktails geladen"
 
     def on_cocktail_icon_pressed(self, _instance, cocktail_name):
-        self.status_label.text = f"Ausgewählt: {cocktail_name}"
+        popup = CocktailRecipePopup(self, cocktail_name)
+        popup.open()
+
+
+class CocktailRecipePopup(Popup):
+    def __init__(self, home_screen, cocktail_name, **kwargs):
+        super().__init__(**kwargs)
+        self.home_screen = home_screen
+        self.cocktail_name = cocktail_name
+        self.title = cocktail_name
+        self.size_hint = (0.9, 0.86)
+        self.auto_dismiss = False
+
+        root = BoxLayout(orientation='vertical', padding=[16, 16, 16, 16], spacing=12)
+
+        content_row = BoxLayout(orientation='horizontal', spacing=16)
+
+        left_box = AnchorLayout(anchor_x='center', anchor_y='center', size_hint=(0.46, 1))
+        icon_filename = self.cocktail_name.replace(' ', '_') + '.png'
+        icon_path = os.path.join(COCKTAILS_ICON_DIR, icon_filename)
+        if not os.path.exists(icon_path):
+            icon_path = ""
+            for candidate in sorted(os.listdir(COCKTAILS_ICON_DIR)) if os.path.isdir(COCKTAILS_ICON_DIR) else []:
+                if not candidate.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    continue
+                if pretty_cocktail_name(candidate) == self.cocktail_name:
+                    icon_path = os.path.join(COCKTAILS_ICON_DIR, candidate)
+                    break
+
+        large_icon = Image(
+            source=icon_path,
+            size_hint=(None, None),
+            size=(384, 576),
+            allow_stretch=True,
+            keep_ratio=True
+        )
+        left_box.add_widget(large_icon)
+        content_row.add_widget(left_box)
+
+        right_box = BoxLayout(orientation='vertical', spacing=8, size_hint=(0.54, 1))
+
+        recipe_rows = get_cocktail_recipe(cocktail_name)
+        recipe_text = []
+        for row in recipe_rows:
+            recipe_text.append(f"{row['ingredient_name']}: {_format_amount_ml(row['amount_ml'])} ml")
+
+        ingredients_title = Label(
+            text="Zutaten",
+            size_hint_y=None,
+            height=36,
+            halign='left',
+            valign='middle',
+            font_size=22,
+            color=[1, 1, 1, 1]
+        )
+        ingredients_title.bind(size=lambda inst, _value: setattr(inst, 'text_size', inst.size))
+        right_box.add_widget(ingredients_title)
+
+        recipe_label = Label(
+            text="\n".join(recipe_text) if recipe_text else "Kein Rezept gefunden",
+            halign='left',
+            valign='top',
+            font_size=18,
+            color=[1, 1, 1, 1]
+        )
+        recipe_label.bind(size=lambda inst, _value: setattr(inst, 'text_size', inst.size))
+        right_box.add_widget(recipe_label)
+
+        requirements = get_cocktail_start_requirements(cocktail_name)
+        self.cocktail_can_start = bool(requirements['ready'])
+        if self.cocktail_can_start:
+            rinse_position = requirements['rinse_position']
+            end_position = requirements['end_position']
+            plan_text = f"Bereit: Rinse {rinse_position}, Ende {end_position}"
+            plan_color = [0.7, 1, 0.7, 1]
+        else:
+            plan_text = "Nicht startbar: " + " | ".join(requirements['missing_reasons'])
+            plan_color = [1, 0.7, 0.7, 1]
+
+        self.plan_label = Label(
+            text=plan_text,
+            size_hint_y=None,
+            height=32,
+            halign='left',
+            valign='middle',
+            font_size=15,
+            color=plan_color
+        )
+        self.plan_label.bind(size=lambda inst, _value: setattr(inst, 'text_size', inst.size))
+        right_box.add_widget(self.plan_label)
+
+        self.status_label = Label(
+            text="Bereit",
+            size_hint_y=None,
+            height=30,
+            font_size=15,
+            halign='left',
+            valign='middle',
+            color=[0.9, 0.95, 1, 1]
+        )
+        self.status_label.bind(size=lambda inst, _value: setattr(inst, 'text_size', inst.size))
+        right_box.add_widget(self.status_label)
+
+        content_row.add_widget(right_box)
+        root.add_widget(content_row)
+
+        button_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=54, spacing=10)
+        close_btn = Button(
+            text="Schließen",
+            font_size=18,
+            background_normal='',
+            background_down='',
+            background_color=(0.82, 0.15, 0.15, 1)
+        )
+        start_btn = Button(
+            text="Start",
+            font_size=18,
+            disabled=not self.cocktail_can_start,
+            background_normal='',
+            background_down='',
+            background_color=(0.18, 0.68, 0.28, 1)
+        )
+        start_btn.opacity = 1.0 if self.cocktail_can_start else 0.45
+        start_btn.bind(on_press=self._start_cocktail)
+        close_btn.bind(on_press=lambda _btn: self.dismiss())
+        button_row.add_widget(close_btn)
+        button_row.add_widget(start_btn)
+        root.add_widget(button_row)
+
+        self.content = root
+
+    def _start_cocktail(self, _instance):
+        self.status_label.text = f"Starte {self.cocktail_name}..."
+        self.dismiss()
+        progress_popup = CocktailProgressPopup(self.home_screen, self.cocktail_name)
+        progress_popup.open()
+        progress_popup.start()
+
+
+class CocktailProgressPopup(Popup):
+    def __init__(self, home_screen, cocktail_name, **kwargs):
+        super().__init__(**kwargs)
+        self.home_screen = home_screen
+        self.cocktail_name = cocktail_name
+        self.title = f"{cocktail_name} - Status"
+        self.size_hint = (0.72, 0.45)
+        self.auto_dismiss = False
+        self._worker = None
+
+        root = BoxLayout(orientation='vertical', padding=[16, 16, 16, 16], spacing=10)
+        self.status_label = Label(
+            text="Initialisiere...",
+            size_hint_y=None,
+            height=42,
+            font_size=17,
+            halign='left',
+            valign='middle',
+            color=[1, 1, 1, 1]
+        )
+        self.status_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(self.status_label)
+
+        self.progress_bar = ProgressBar(max=100, value=0, size_hint_y=None, height=26)
+        root.add_widget(self.progress_bar)
+
+        self.percent_label = Label(
+            text="0 %",
+            size_hint_y=None,
+            height=28,
+            font_size=16,
+            halign='center',
+            valign='middle',
+            color=[0.9, 0.95, 1, 1]
+        )
+        self.percent_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(self.percent_label)
+
+        self.eta_label = Label(
+            text="Verbleibend: --:--",
+            size_hint_y=None,
+            height=28,
+            font_size=15,
+            halign='center',
+            valign='middle',
+            color=[0.8, 0.9, 1, 1]
+        )
+        self.eta_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(self.eta_label)
+
+        self.content = root
+
+    def _format_remaining(self, seconds):
+        total = max(0, int(round(float(seconds))))
+        minutes = total // 60
+        secs = total % 60
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _apply_progress_ui(self, message, done_phases, total_phases, remaining_seconds):
+        total = max(1, int(total_phases))
+        done = max(0, min(int(done_phases), total))
+        percent = int(round((done / float(total)) * 100.0))
+
+        self.status_label.text = message
+        self.progress_bar.value = percent
+        self.percent_label.text = f"{percent} %"
+        self.eta_label.text = f"Verbleibend: {self._format_remaining(remaining_seconds)}"
+
+    def _report_progress(self, message, done_phases, total_phases, remaining_seconds):
+        Clock.schedule_once(
+            lambda _dt: self._apply_progress_ui(message, done_phases, total_phases, remaining_seconds),
+            0
+        )
+
+    def _finish(self, success, error_message=None):
+        def _finish_ui(_dt):
+            self.dismiss()
+            if success:
+                finished_popup = CocktailFinishedPopup(self.home_screen, self.cocktail_name)
+                finished_popup.open()
+                return
+
+            error_label = Label(
+                text=error_message or f"{self.cocktail_name} abgebrochen",
+                halign='center',
+                valign='middle'
+            )
+            error_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+
+            error_popup = Popup(
+                title="Fehler",
+                size_hint=(0.58, 0.34),
+                auto_dismiss=True,
+                content=error_label
+            )
+            error_popup.open()
+
+        Clock.schedule_once(_finish_ui, 0)
+
+    def _run_worker(self):
+        try:
+            success = self.home_screen.start_cocktail(self.cocktail_name, progress_fn=self._report_progress)
+            if success:
+                self._finish(True)
+                return
+            self._finish(False, error_message=f"{self.cocktail_name} abgebrochen")
+        except Exception as exc:
+            logging.exception("Cocktail run failed")
+            self._finish(False, error_message=f"Fehler: {exc}")
+
+    def start(self):
+        if self._worker and self._worker.is_alive():
+            return
+        self._worker = threading.Thread(target=self._run_worker, daemon=True)
+        self._worker.start()
+
+
+class CocktailFinishedPopup(Popup):
+    def __init__(self, home_screen, cocktail_name, **kwargs):
+        super().__init__(**kwargs)
+        self.home_screen = home_screen
+        self.cocktail_name = cocktail_name
+        self.title = "Fertig"
+        self.size_hint = (0.62, 0.42)
+        self.auto_dismiss = False
+
+        root = BoxLayout(orientation='vertical', padding=[16, 16, 16, 16], spacing=12)
+        message_label = Label(
+            text="Cocktail ist fertig",
+            font_size=28,
+            size_hint_y=None,
+            height=52,
+            halign='center',
+            valign='middle',
+            color=[1, 1, 1, 1]
+        )
+        message_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(message_label)
+
+        self.status_label = Label(
+            text=f"{self.cocktail_name} abgeschlossen",
+            font_size=15,
+            size_hint_y=None,
+            height=34,
+            halign='center',
+            valign='middle',
+            color=[0.9, 0.95, 1, 1]
+        )
+        self.status_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(self.status_label)
+
+        button_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=56, spacing=10)
+        self.rinse_btn = Button(
+            text="Spülen",
+            font_size=18,
+            background_normal='',
+            background_down='',
+            background_color=(0.2, 0.5, 0.9, 1)
+        )
+        self.skip_btn = Button(
+            text="Überspringen",
+            font_size=18,
+            background_normal='',
+            background_down='',
+            background_color=(0.5, 0.5, 0.5, 1)
+        )
+        self.rinse_btn.bind(on_press=self._run_rinse)
+        self.skip_btn.bind(on_press=lambda _btn: self.dismiss())
+        button_row.add_widget(self.rinse_btn)
+        button_row.add_widget(self.skip_btn)
+        root.add_widget(button_row)
+
+        self.content = root
+
+    def _set_busy(self, busy):
+        self.rinse_btn.disabled = bool(busy)
+        self.skip_btn.disabled = bool(busy)
+        self.rinse_btn.opacity = 0.45 if busy else 1.0
+        self.skip_btn.opacity = 0.45 if busy else 1.0
+
+    def _run_rinse(self, _instance):
+        self._set_busy(True)
+        self.status_label.text = "Spülvorgang startet..."
+        success = self.home_screen.run_rinse_cycle(rinse_ml=50.0)
+        if success:
+            self.status_label.text = "Spülen abgeschlossen"
+            self.dismiss()
+            return
+
+        self.status_label.text = "Spülen fehlgeschlagen"
+        self._set_busy(False)
 
 class GCodeScreen(Screen):
     def __init__(self, **kwargs):
@@ -3046,6 +4351,7 @@ class MainScreen(BoxLayout):
 
 class CocktailApp(App):
     def build(self):
+        initialize_cocktail_database()
         try:
             logging.info(f"Window size={Window.size}, system_size={Window.system_size}, dpi={Window.dpi}")
         except Exception:
