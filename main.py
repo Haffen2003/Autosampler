@@ -3236,13 +3236,20 @@ class LuefterScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._refresh_event = None
+        self.secondary_fan_name = str(CONFIG.get('secondary_fan_name', 'fan1')).strip() or 'fan1'
 
         root = BoxLayout(orientation='vertical', padding=[14, 10, 14, 12], spacing=10)
 
         title = Label(text="Lüftersteuerung", size_hint_y=None, height=44, font_size=24, color=[1, 1, 1, 1])
         root.add_widget(title)
 
-        axis_info = Label(text="X: Zeit (s)   |   Y: PWM Power (%)", size_hint_y=None, height=24, font_size=14, color=[0.78, 0.9, 1, 1])
+        axis_info = Label(
+            text=f"X: Zeit (s)   |   Y: PWM Power (%)   |   Sync: FAN + {self.secondary_fan_name}",
+            size_hint_y=None,
+            height=24,
+            font_size=14,
+            color=[0.78, 0.9, 1, 1]
+        )
         root.add_widget(axis_info)
 
         graph_row = BoxLayout(orientation='horizontal', size_hint=(1, 0.56), spacing=8)
@@ -3331,11 +3338,11 @@ class LuefterScreen(Screen):
         primary_ok = moonraker.send_gcode("M107")
         fan1_ok = self._send_fan1_speed(0)
         if primary_ok and fan1_ok:
-            self.status_label.text = "Lüfter ausgeschaltet"
-            logging.info("Fans disabled via M107 + SET_FAN_SPEED FAN=FAN1 SPEED=0.000")
+            self.status_label.text = f"Lüfter ausgeschaltet: FAN + {self.secondary_fan_name}"
+            logging.info(f"Fans disabled via M107 + SET_FAN_SPEED FAN={self.secondary_fan_name} SPEED=0.000")
             self.fan_graph.add_pwm_sample(0)
         else:
-            self.status_label.text = "Fehler: Lüfter konnten nicht synchron ausgeschaltet werden"
+            self.status_label.text = f"Fehler: FAN + {self.secondary_fan_name} konnten nicht synchron ausgeschaltet werden"
 
     def apply_pwm(self, _instance):
         pwm_percent = self._slider_to_pwm_percent(self.pwm_slider.value)
@@ -3343,8 +3350,7 @@ class LuefterScreen(Screen):
 
     def _send_fan1_speed(self, pwm_percent):
         speed = max(0.0, min(1.0, float(pwm_percent) / 100.0))
-        secondary_fan_name = str(CONFIG.get('secondary_fan_name', 'fan1')).strip() or 'fan1'
-        return moonraker.send_gcode(f"SET_FAN_SPEED FAN={secondary_fan_name} SPEED={speed:.3f}")
+        return moonraker.send_gcode(f"SET_FAN_SPEED FAN={self.secondary_fan_name} SPEED={speed:.3f}")
 
     def _send_pwm(self, pwm_percent):
         gcode_value = self._pwm_percent_to_gcode_value(pwm_percent)
@@ -3352,11 +3358,11 @@ class LuefterScreen(Screen):
         primary_ok = moonraker.send_gcode(command)
         fan1_ok = self._send_fan1_speed(pwm_percent)
         if primary_ok and fan1_ok:
-            self.status_label.text = f"PWM gesetzt: {pwm_percent} %"
-            logging.info(f"Fans PWM set to {pwm_percent}% (M106 S{gcode_value} + FAN1)")
+            self.status_label.text = f"PWM gesetzt: {pwm_percent} % (FAN + {self.secondary_fan_name})"
+            logging.info(f"Fans PWM set to {pwm_percent}% (M106 S{gcode_value} + {self.secondary_fan_name})")
             self.fan_graph.add_pwm_sample(pwm_percent)
         else:
-            self.status_label.text = "Fehler: PWM konnte nicht synchron auf beide Lüfter gesetzt werden"
+            self.status_label.text = f"Fehler: PWM konnte nicht synchron auf FAN + {self.secondary_fan_name} gesetzt werden"
 
     def update_pwm_graph(self):
         pwm_percent = self._slider_to_pwm_percent(self.pwm_slider.value)
