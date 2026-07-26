@@ -3343,7 +3343,8 @@ class LuefterScreen(Screen):
 
     def _send_fan1_speed(self, pwm_percent):
         speed = max(0.0, min(1.0, float(pwm_percent) / 100.0))
-        return moonraker.send_gcode(f"SET_FAN_SPEED FAN=FAN1 SPEED={speed:.3f}")
+        secondary_fan_name = str(CONFIG.get('secondary_fan_name', 'fan1')).strip() or 'fan1'
+        return moonraker.send_gcode(f"SET_FAN_SPEED FAN={secondary_fan_name} SPEED={speed:.3f}")
 
     def _send_pwm(self, pwm_percent):
         gcode_value = self._pwm_percent_to_gcode_value(pwm_percent)

@@ -22,5 +22,6 @@
   "z_settle_time_s": 1.0,
   "z_wait_timeout_s": 180.0,
   "calibration_dwell_s": 15.0,
-  "calibration_final_draw_mm": 2.0
+  "calibration_final_draw_mm": 2.0,
+  "secondary_fan_name": "Fan1"
 }
