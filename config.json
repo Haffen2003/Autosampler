@@ -6,8 +6,8 @@
   "z_safety_enabled": true,
   "z_endstop_clearance_mm": 10.0,
   "z_move_speed_mm_min": 5200.0,
-  "syringe_speed_mm_s": 7.0,
-  "syringe_accel_mm_s2": 60.0,
+  "syringe_speed_mm_s": 5.0,
+  "syringe_accel_mm_s2": 50.0,
   "syringe_min_pos_mm": -200.0,
   "syringe_max_pos_mm": 200.0,
   "syringe_home_coarse_mm": 170.0,
@@ -21,6 +21,6 @@
   "z_zero_tolerance_mm": 0.15,
   "z_settle_time_s": 1.0,
   "z_wait_timeout_s": 180.0,
-  "calibration_dwell_s": 10.0,
+  "calibration_dwell_s": 15.0,
   "calibration_final_draw_mm": 2.0
 }

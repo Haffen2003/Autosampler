@@ -3328,26 +3328,34 @@ class LuefterScreen(Screen):
         self._send_pwm(pwm_percent)
 
     def fan_off(self, _instance):
-        if moonraker.send_gcode("M107"):
+        primary_ok = moonraker.send_gcode("M107")
+        fan1_ok = self._send_fan1_speed(0)
+        if primary_ok and fan1_ok:
             self.status_label.text = "Lüfter ausgeschaltet"
-            logging.info("Fan disabled via M107")
+            logging.info("Fans disabled via M107 + SET_FAN_SPEED FAN=FAN1 SPEED=0.000")
             self.fan_graph.add_pwm_sample(0)
         else:
-            self.status_label.text = "Fehler: Lüfter konnte nicht ausgeschaltet werden"
+            self.status_label.text = "Fehler: Lüfter konnten nicht synchron ausgeschaltet werden"
 
     def apply_pwm(self, _instance):
         pwm_percent = self._slider_to_pwm_percent(self.pwm_slider.value)
         self._send_pwm(pwm_percent)
 
+    def _send_fan1_speed(self, pwm_percent):
+        speed = max(0.0, min(1.0, float(pwm_percent) / 100.0))
+        return moonraker.send_gcode(f"SET_FAN_SPEED FAN=FAN1 SPEED={speed:.3f}")
+
     def _send_pwm(self, pwm_percent):
         gcode_value = self._pwm_percent_to_gcode_value(pwm_percent)
         command = f"M106 S{gcode_value}"
-        if moonraker.send_gcode(command):
+        primary_ok = moonraker.send_gcode(command)
+        fan1_ok = self._send_fan1_speed(pwm_percent)
+        if primary_ok and fan1_ok:
             self.status_label.text = f"PWM gesetzt: {pwm_percent} %"
-            logging.info(f"Fan PWM set to {pwm_percent}% (S{gcode_value})")
+            logging.info(f"Fans PWM set to {pwm_percent}% (M106 S{gcode_value} + FAN1)")
             self.fan_graph.add_pwm_sample(pwm_percent)
         else:
-            self.status_label.text = "Fehler: PWM konnte nicht gesetzt werden"
+            self.status_label.text = "Fehler: PWM konnte nicht synchron auf beide Lüfter gesetzt werden"
 
     def update_pwm_graph(self):
         pwm_percent = self._slider_to_pwm_percent(self.pwm_slider.value)
