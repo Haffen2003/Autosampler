@@ -603,6 +603,26 @@ def get_cocktail_names():
     return [row['name'] for row in rows]
 
 
+def get_cocktails_catalog():
+    """Return cocktail id+name pairs from SQLite."""
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, name
+            FROM cocktails
+            ORDER BY name COLLATE NOCASE
+            """
+        ).fetchall()
+    return [
+        {
+            'id': int(row['id']),
+            'name': row['name']
+        }
+        for row in rows
+    ]
+
+
 def get_cocktail_ingredients(cocktail_name):
     """Return ingredient list for one cocktail directly from SQLite."""
     rows = get_cocktail_recipe(cocktail_name)
@@ -718,6 +738,31 @@ def get_cocktail_recipe(cocktail_name):
             ORDER BY ci.id ASC, i.name COLLATE NOCASE
             """,
             (cocktail_name,)
+        ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def get_cocktail_recipe_by_id(cocktail_id):
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                c.id AS cocktail_id,
+                c.name AS cocktail_name,
+                i.id AS ingredient_id,
+                i.name AS ingredient_name,
+                ci.amount_ml AS amount_ml,
+                ip.position_name AS position_name
+            FROM cocktails c
+            JOIN cocktail_ingredients ci ON ci.cocktail_id = c.id
+            JOIN ingredients i ON i.id = ci.ingredient_id
+            LEFT JOIN ingredient_positions ip ON ip.ingredient_id = i.id
+            WHERE c.id = ?
+            ORDER BY ci.id ASC, i.name COLLATE NOCASE
+            """,
+            (int(cocktail_id),)
         ).fetchall()
 
     return [dict(row) for row in rows]
@@ -3897,13 +3942,15 @@ class HomeScreen(Screen):
             self.status_label.text = f"Kein Ordner gefunden: {COCKTAILS_ICON_DIR}"
             return
 
-        cocktail_names = get_cocktail_names()
-        if not cocktail_names:
+        cocktails = get_cocktails_catalog()
+        if not cocktails:
             self.status_label.text = "Keine Cocktails in Datenbank gefunden."
             return
 
         loaded_count = 0
-        for cocktail_name in cocktail_names:
+        for cocktail in cocktails:
+            cocktail_id = int(cocktail['id'])
+            cocktail_name = cocktail['name']
             is_available = cocktail_is_available(cocktail_name)
             card = BoxLayout(
                 orientation='vertical',
@@ -3927,7 +3974,13 @@ class HomeScreen(Screen):
             cocktail_button.disabled = not is_available
             cocktail_button.opacity = 1.0 if is_available else 0.32
             if is_available:
-                cocktail_button.bind(on_release=partial(self.on_cocktail_icon_pressed, cocktail_name=cocktail_name))
+                cocktail_button.bind(
+                    on_release=partial(
+                        self.on_cocktail_icon_pressed,
+                        cocktail_name=cocktail_name,
+                        cocktail_id=cocktail_id
+                    )
+                )
 
             name_label = Label(
                 text=cocktail_name,
@@ -3949,16 +4002,17 @@ class HomeScreen(Screen):
 
         self.status_label.text = f"{loaded_count} Cocktails aus Datenbank geladen"
 
-    def on_cocktail_icon_pressed(self, _instance, cocktail_name):
-        popup = CocktailRecipePopup(self, cocktail_name)
+    def on_cocktail_icon_pressed(self, _instance, cocktail_name, cocktail_id=None):
+        popup = CocktailRecipePopup(self, cocktail_name, cocktail_id=cocktail_id)
         popup.open()
 
 
 class CocktailRecipePopup(Popup):
-    def __init__(self, home_screen, cocktail_name, **kwargs):
+    def __init__(self, home_screen, cocktail_name, cocktail_id=None, **kwargs):
         super().__init__(**kwargs)
         self.home_screen = home_screen
         self.cocktail_name = cocktail_name
+        self.cocktail_id = cocktail_id
         self.title = cocktail_name
         self.size_hint = (0.9, 0.86)
         self.auto_dismiss = False
@@ -3982,7 +4036,13 @@ class CocktailRecipePopup(Popup):
 
         right_box = BoxLayout(orientation='vertical', spacing=8, size_hint=(0.54, 1))
 
-        recipe_rows = get_cocktail_recipe(cocktail_name)
+        recipe_rows = get_cocktail_recipe_by_id(self.cocktail_id) if self.cocktail_id is not None else get_cocktail_recipe(cocktail_name)
+        if recipe_rows:
+            canonical_name = recipe_rows[0].get('cocktail_name')
+            if canonical_name:
+                self.cocktail_name = canonical_name
+                self.title = canonical_name
+
         recipe_text = []
         for row in recipe_rows:
             recipe_text.append(f"{row['ingredient_name']}: {_format_amount_ml(row['amount_ml'])} ml")
