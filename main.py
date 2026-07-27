@@ -508,28 +508,32 @@ def initialize_cocktail_database():
             """
         )
 
-        for cocktail_name, recipe in DEFAULT_COCKTAIL_RECIPES.items():
-            cursor.execute("INSERT OR IGNORE INTO cocktails (name) VALUES (?)", (cocktail_name,))
-            cursor.execute("SELECT id FROM cocktails WHERE name = ?", (cocktail_name,))
-            cocktail_id = cursor.fetchone()[0]
+        cocktail_count_row = cursor.execute("SELECT COUNT(*) AS total FROM cocktails").fetchone()
+        cocktail_count = int(cocktail_count_row['total']) if cocktail_count_row is not None else 0
 
-            for ingredient in recipe:
-                ingredient_name = _normalize_ingredient_name(ingredient['name'])
-                amount_ml = float(ingredient['amount'])
+        if cocktail_count == 0:
+            for cocktail_name, recipe in DEFAULT_COCKTAIL_RECIPES.items():
+                cursor.execute("INSERT OR IGNORE INTO cocktails (name) VALUES (?)", (cocktail_name,))
+                cursor.execute("SELECT id FROM cocktails WHERE name = ?", (cocktail_name,))
+                cocktail_id = cursor.fetchone()[0]
 
-                cursor.execute("INSERT OR IGNORE INTO ingredients (name) VALUES (?)", (ingredient_name,))
-                cursor.execute("SELECT id FROM ingredients WHERE name = ?", (ingredient_name,))
-                ingredient_id = cursor.fetchone()[0]
+                for ingredient in recipe:
+                    ingredient_name = _normalize_ingredient_name(ingredient['name'])
+                    amount_ml = float(ingredient['amount'])
 
-                cursor.execute(
-                    """
-                    INSERT INTO cocktail_ingredients (cocktail_id, ingredient_id, amount_ml)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(cocktail_id, ingredient_id)
-                    DO UPDATE SET amount_ml = excluded.amount_ml
-                    """,
-                    (cocktail_id, ingredient_id, amount_ml)
-                )
+                    cursor.execute("INSERT OR IGNORE INTO ingredients (name) VALUES (?)", (ingredient_name,))
+                    cursor.execute("SELECT id FROM ingredients WHERE name = ?", (ingredient_name,))
+                    ingredient_id = cursor.fetchone()[0]
+
+                    cursor.execute(
+                        """
+                        INSERT INTO cocktail_ingredients (cocktail_id, ingredient_id, amount_ml)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(cocktail_id, ingredient_id)
+                        DO UPDATE SET amount_ml = excluded.amount_ml
+                        """,
+                        (cocktail_id, ingredient_id, amount_ml)
+                    )
 
         connection.commit()
 
@@ -555,6 +559,81 @@ def load_cocktails():
             'amount': float(row['amount_ml'])
         })
     return cocktails
+
+
+def get_cocktail_names():
+    """Return all cocktail names from SQLite (authoritative source)."""
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT name
+            FROM cocktails
+            ORDER BY name COLLATE NOCASE
+            """
+        ).fetchall()
+    return [row['name'] for row in rows]
+
+
+def get_cocktail_ingredients(cocktail_name):
+    """Return ingredient list for one cocktail directly from SQLite."""
+    rows = get_cocktail_recipe(cocktail_name)
+    return [
+        {
+            'name': row['ingredient_name'],
+            'amount': float(row['amount_ml'])
+        }
+        for row in rows
+    ]
+
+
+def save_cocktail_recipe(cocktail_name, ingredients):
+    """Store one full cocktail recipe in SQLite and replace old ingredient rows."""
+    normalized_cocktail_name = str(cocktail_name).strip()
+    if not normalized_cocktail_name:
+        return False
+
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        cursor = connection.cursor()
+        cursor.execute("INSERT OR IGNORE INTO cocktails (name) VALUES (?)", (normalized_cocktail_name,))
+        cursor.execute("SELECT id FROM cocktails WHERE name = ?", (normalized_cocktail_name,))
+        cocktail_row = cursor.fetchone()
+        if cocktail_row is None:
+            return False
+
+        cocktail_id = int(cocktail_row['id'])
+        cursor.execute("DELETE FROM cocktail_ingredients WHERE cocktail_id = ?", (cocktail_id,))
+
+        for ingredient in (ingredients or []):
+            ingredient_name = _normalize_ingredient_name(ingredient.get('name', ''))
+            if not ingredient_name:
+                continue
+
+            try:
+                amount_ml = float(ingredient.get('amount', 0))
+            except (TypeError, ValueError):
+                continue
+
+            cursor.execute("INSERT OR IGNORE INTO ingredients (name) VALUES (?)", (ingredient_name,))
+            cursor.execute("SELECT id FROM ingredients WHERE name = ?", (ingredient_name,))
+            ingredient_row = cursor.fetchone()
+            if ingredient_row is None:
+                continue
+
+            ingredient_id = int(ingredient_row['id'])
+            cursor.execute(
+                """
+                INSERT INTO cocktail_ingredients (cocktail_id, ingredient_id, amount_ml)
+                VALUES (?, ?, ?)
+                ON CONFLICT(cocktail_id, ingredient_id)
+                DO UPDATE SET amount_ml = excluded.amount_ml
+                """,
+                (cocktail_id, ingredient_id, amount_ml)
+            )
+
+        connection.commit()
+    return True
 
 
 def save_cocktails(data):
@@ -943,7 +1022,6 @@ class Button(KivyButton):
 class CocktailInputScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.cocktail_data = load_cocktails()
         self.ingredients = []
 
         layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
@@ -998,24 +1076,27 @@ class CocktailInputScreen(Screen):
     def save_cocktail(self, instance):
         name = self.name_input.text.strip()
         if name and self.ingredients:
-            self.cocktail_data[name] = self.ingredients
-            save_cocktails(self.cocktail_data)
-            self.status_label.text = f"Cocktail '{name}' gespeichert!"
-            self.name_input.text = ""
-            self.ingredients = []
-            self.ingredients_area.clear_widgets()
+            if save_cocktail_recipe(name, self.ingredients):
+                self.status_label.text = f"Cocktail '{name}' gespeichert!"
+                self.name_input.text = ""
+                self.ingredients = []
+                self.ingredients_area.clear_widgets()
+                self.refresh_cocktails(None)
+            else:
+                self.status_label.text = "[WARN] Cocktail konnte nicht gespeichert werden."
         else:
             self.status_label.text = "[WARN] Bitte Namen und mindestens eine Zutat eingeben."
 
     def refresh_cocktails(self, instance):
-        self.cocktail_data = load_cocktails()
         self.status_label.text = "[INFO] Cocktaildaten aktualisiert."
 
         # Zugriff auf PreparationScreen
         try:
             prep_screen = self.manager.get_screen("prep")
-            prep_screen.cocktail_data = self.cocktail_data
-            prep_screen.spinner.values = list(self.cocktail_data.keys())
+            cocktail_names = get_cocktail_names()
+            prep_screen.spinner.values = cocktail_names or ["Keine Cocktails verfügbar"]
+            if prep_screen.spinner.text not in prep_screen.spinner.values:
+                prep_screen.spinner.text = "Cocktail auswählen"
             self.status_label.text += " → Zubereitung aktualisiert."
         except Exception as e:
             logging.error(f'Error updating prep screen: {e}')
@@ -1219,7 +1300,6 @@ class CircleButton(Widget):
 class PreparationScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.cocktail_data = load_cocktails()
         self.active_color = None
         self.active_ingredient_name = None
         self.active_special_position_key = None
@@ -1236,7 +1316,7 @@ class PreparationScreen(Screen):
         self.content_area = BoxLayout(orientation='vertical', size_hint=(1, None), height=content_height, pos_hint={'top': 1})
         
         # Ensure spinner always has values and a valid initial selection
-        cocktail_names = list(self.cocktail_data.keys())
+        cocktail_names = get_cocktail_names()
         if not cocktail_names:
             cocktail_names = ["Keine Cocktails verfügbar"]
         
@@ -1298,8 +1378,9 @@ class PreparationScreen(Screen):
         self.refresh_special_positions_ui()
 
     def on_pre_enter(self, *args):
-        self.cocktail_data = load_cocktails()
-        self.spinner.values = list(self.cocktail_data.keys()) or ["Keine Cocktails verfügbar"]
+        self.spinner.values = get_cocktail_names() or ["Keine Cocktails verfügbar"]
+        if self.spinner.text not in self.spinner.values:
+            self.spinner.text = "Cocktail auswählen"
         self.refresh_slot_assignments()
         self.refresh_special_positions_ui()
         return super().on_pre_enter(*args)
@@ -1401,14 +1482,13 @@ class PreparationScreen(Screen):
         try:
             self.active_color = None
             self.active_ingredient_name = None
-            self.cocktail_data = load_cocktails()
             assignments = get_all_ingredient_positions()
 
             # Clear existing widgets to prevent duplicates
             self.ingredients_area.clear_widgets()
 
             # Neue Zutaten hinzufügen
-            ingredients = self.cocktail_data.get(text, [])
+            ingredients = get_cocktail_ingredients(text)
             if not ingredients:
                 logging.warning(f'No ingredients found for cocktail: {text}')
                 self.ingredients_area.add_widget(Label(text="Keine Zutaten verfügbar", size_hint_y=None, height=50, color=[1, 1, 1, 1]))
