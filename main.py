@@ -407,6 +407,34 @@ def pretty_cocktail_name(filename):
     return base_name.replace('_', ' ')
 
 
+def _normalize_cocktail_key(name):
+    return str(name).strip().lower().replace('_', ' ')
+
+
+def find_cocktail_icon_path(cocktail_name):
+    """Find icon path for a cocktail name; DB name is authoritative, icon is optional."""
+    if not os.path.isdir(COCKTAILS_ICON_DIR):
+        return ""
+
+    target = _normalize_cocktail_key(cocktail_name)
+    direct_candidates = [
+        f"{str(cocktail_name).strip().replace(' ', '_')}.png",
+        f"{str(cocktail_name).strip().replace(' ', '_')}.jpg",
+        f"{str(cocktail_name).strip().replace(' ', '_')}.jpeg"
+    ]
+    for candidate in direct_candidates:
+        candidate_path = os.path.join(COCKTAILS_ICON_DIR, candidate)
+        if os.path.exists(candidate_path):
+            return candidate_path
+
+    for candidate in sorted(os.listdir(COCKTAILS_ICON_DIR)):
+        if not candidate.lower().endswith(('.png', '.jpg', '.jpeg')):
+            continue
+        if _normalize_cocktail_key(pretty_cocktail_name(candidate)) == target:
+            return os.path.join(COCKTAILS_ICON_DIR, candidate)
+    return ""
+
+
 def _normalize_ingredient_name(name):
     return str(name).strip().replace('Weißer Rum', 'Weißer Rum')
 
@@ -3869,16 +3897,13 @@ class HomeScreen(Screen):
             self.status_label.text = f"Kein Ordner gefunden: {COCKTAILS_ICON_DIR}"
             return
 
-        icon_files = sorted(
-            [f for f in os.listdir(COCKTAILS_ICON_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-        )
-
-        if not icon_files:
-            self.status_label.text = "Keine Cocktail-Icons in Cocktails/128_192 gefunden."
+        cocktail_names = get_cocktail_names()
+        if not cocktail_names:
+            self.status_label.text = "Keine Cocktails in Datenbank gefunden."
             return
 
-        for icon_file in icon_files:
-            cocktail_name = pretty_cocktail_name(icon_file)
+        loaded_count = 0
+        for cocktail_name in cocktail_names:
             is_available = cocktail_is_available(cocktail_name)
             card = BoxLayout(
                 orientation='vertical',
@@ -3888,7 +3913,7 @@ class HomeScreen(Screen):
                 padding=[4, 4, 4, 4]
             )
 
-            icon_path = os.path.join(COCKTAILS_ICON_DIR, icon_file)
+            icon_path = find_cocktail_icon_path(cocktail_name)
             cocktail_button = Button(
                 text="",
                 size_hint=(None, None),
@@ -3920,8 +3945,9 @@ class HomeScreen(Screen):
             card.add_widget(cocktail_button)
             card.add_widget(name_label)
             self.grid.add_widget(card)
+            loaded_count += 1
 
-        self.status_label.text = f"{len(icon_files)} Cocktails geladen"
+        self.status_label.text = f"{loaded_count} Cocktails aus Datenbank geladen"
 
     def on_cocktail_icon_pressed(self, _instance, cocktail_name):
         popup = CocktailRecipePopup(self, cocktail_name)
@@ -3942,16 +3968,7 @@ class CocktailRecipePopup(Popup):
         content_row = BoxLayout(orientation='horizontal', spacing=16)
 
         left_box = AnchorLayout(anchor_x='center', anchor_y='center', size_hint=(0.46, 1))
-        icon_filename = self.cocktail_name.replace(' ', '_') + '.png'
-        icon_path = os.path.join(COCKTAILS_ICON_DIR, icon_filename)
-        if not os.path.exists(icon_path):
-            icon_path = ""
-            for candidate in sorted(os.listdir(COCKTAILS_ICON_DIR)) if os.path.isdir(COCKTAILS_ICON_DIR) else []:
-                if not candidate.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    continue
-                if pretty_cocktail_name(candidate) == self.cocktail_name:
-                    icon_path = os.path.join(COCKTAILS_ICON_DIR, candidate)
-                    break
+        icon_path = find_cocktail_icon_path(self.cocktail_name)
 
         large_icon = Image(
             source=icon_path,
