@@ -330,7 +330,20 @@ ICON_DIR = os.path.join(BASE_DIR, CONFIG.get('icon_dir', 'Icons'))
 BACKGROUND_DIR = os.path.join(BASE_DIR, 'Background')
 COCKTAILS_DIR = os.path.join(BASE_DIR, 'Cocktails')
 COCKTAILS_ICON_DIR = os.path.join(COCKTAILS_DIR, '128_192')
-COCKTAIL_DB_FILE = os.path.join(BASE_DIR, 'cocktails.sqlite3')
+
+
+def _resolve_cocktail_db_file():
+    configured_path = str(CONFIG.get('cocktail_db_file', 'cocktails.sqlite3')).strip()
+    if not configured_path:
+        configured_path = 'cocktails.sqlite3'
+
+    if os.path.isabs(configured_path):
+        return configured_path
+    return os.path.abspath(os.path.join(BASE_DIR, configured_path))
+
+
+COCKTAIL_DB_FILE = _resolve_cocktail_db_file()
+logging.info(f"Cocktail DB path resolved: {COCKTAIL_DB_FILE}")
 
 DEFAULT_COCKTAIL_RECIPES = {
     "Black Russian": [
