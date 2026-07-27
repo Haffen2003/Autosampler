@@ -4043,6 +4043,14 @@ class CocktailRecipePopup(Popup):
                 self.cocktail_name = canonical_name
                 self.title = canonical_name
 
+        logging.info(
+            "Cocktail popup loaded: requested_name='%s', cocktail_id=%s, resolved_name='%s', recipe_rows=%d",
+            cocktail_name,
+            self.cocktail_id,
+            self.cocktail_name,
+            len(recipe_rows)
+        )
+
         recipe_text = []
         for row in recipe_rows:
             recipe_text.append(f"{row['ingredient_name']}: {_format_amount_ml(row['amount_ml'])} ml")
