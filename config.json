@@ -21,7 +21,33 @@
   "z_zero_tolerance_mm": 0.15,
   "z_settle_time_s": 1.0,
   "z_wait_timeout_s": 180.0,
-  "calibration_dwell_s": 20.0,
+  "syringe_wait_base_s": 2.0,
+  "syringe_wait_curve": [
+    {
+      "ml": 30.0,
+      "seconds": 7.0
+    },
+    {
+      "ml": 50.0,
+      "seconds": 10.0
+    },
+    {
+      "ml": 80.0,
+      "seconds": 11.5
+    },
+    {
+      "ml": 120.0,
+      "seconds": 14.0
+    },
+    {
+      "ml": 150.0,
+      "seconds": 15.0
+    },
+    {
+      "ml": 180.0,
+      "seconds": 17.0
+    }
+  ],
   "calibration_final_draw_mm": 2.0,
   "secondary_fan_name": "Fan1"
 }

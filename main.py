@@ -48,7 +48,16 @@ def load_config():
         'icon_dir': 'Icons',
         'enable_cocktail_screen': False,
         'z_safety_enabled': True,
-        'z_move_speed_mm_min': 1200.0
+        'z_move_speed_mm_min': 1200.0,
+        'syringe_wait_base_s': 2.0,
+        'syringe_wait_curve': [
+            {'ml': 30.0, 'seconds': 7.0},
+            {'ml': 50.0, 'seconds': 10.0},
+            {'ml': 80.0, 'seconds': 11.5},
+            {'ml': 120.0, 'seconds': 14.0},
+            {'ml': 150.0, 'seconds': 15.0},
+            {'ml': 180.0, 'seconds': 17.0}
+        ]
     }
 
 CONFIG = load_config()
@@ -221,6 +230,137 @@ def save_syringe_calibration_data(data):
 # Global syringe calibration data. This is filled from the calibration popup.
 SYRINGE_CALIBRATION_DATA = load_syringe_calibration_data()
 
+DEFAULT_SYRINGE_WAIT_CURVE = [
+    (30.0, 7.0),
+    (50.0, 10.0),
+    (80.0, 11.5),
+    (120.0, 14.0),
+    (150.0, 15.0),
+    (180.0, 17.0),
+]
+
+
+def _load_runtime_wait_settings():
+    """Read wait-related settings from config.json so file changes affect new calculations."""
+    try:
+        runtime_config = load_config()
+    except Exception:
+        runtime_config = CONFIG
+    return runtime_config if isinstance(runtime_config, dict) else CONFIG
+
+
+def _syringe_wait_curve_points():
+    runtime_config = _load_runtime_wait_settings()
+    raw_curve = runtime_config.get('syringe_wait_curve', DEFAULT_SYRINGE_WAIT_CURVE)
+    parsed_points = []
+
+    if isinstance(raw_curve, list):
+        for entry in raw_curve:
+            try:
+                if isinstance(entry, dict):
+                    ml_value = float(entry.get('ml'))
+                    seconds_value = float(entry.get('seconds'))
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    ml_value = float(entry[0])
+                    seconds_value = float(entry[1])
+                else:
+                    continue
+            except (TypeError, ValueError):
+                continue
+
+            if ml_value <= 0 or seconds_value < 0:
+                continue
+            parsed_points.append((ml_value, seconds_value))
+
+    if len(parsed_points) < 2:
+        parsed_points = list(DEFAULT_SYRINGE_WAIT_CURVE)
+
+    parsed_points = sorted(parsed_points, key=lambda item: item[0])
+    unique_points = []
+    for ml_value, seconds_value in parsed_points:
+        if unique_points and abs(unique_points[-1][0] - ml_value) < 1e-9:
+            unique_points[-1] = (ml_value, seconds_value)
+            continue
+        unique_points.append((ml_value, seconds_value))
+    return unique_points
+
+
+def _interpolate_wait_curve_seconds(amount_ml):
+    points = _syringe_wait_curve_points()
+    target_ml = max(0.0, float(amount_ml))
+    if not points:
+        return 0.0
+
+    if len(points) == 1:
+        return max(0.0, float(points[0][1]))
+
+    if target_ml <= points[0][0]:
+        x1, y1 = points[0]
+        x2, y2 = points[1]
+    elif target_ml >= points[-1][0]:
+        x1, y1 = points[-2]
+        x2, y2 = points[-1]
+    else:
+        x1 = y1 = x2 = y2 = None
+        for index in range(len(points) - 1):
+            left_x, left_y = points[index]
+            right_x, right_y = points[index + 1]
+            if left_x <= target_ml <= right_x:
+                x1, y1 = left_x, left_y
+                x2, y2 = right_x, right_y
+                break
+
+    if x1 is None or x2 is None or abs(x2 - x1) < 1e-9:
+        return max(0.0, float(points[0][1]))
+
+    slope = (y2 - y1) / (x2 - x1)
+    interpolated = y1 + ((target_ml - x1) * slope)
+    return max(0.0, float(interpolated))
+
+
+def _ml_from_draw_mm(draw_mm):
+    if not isinstance(SYRINGE_CALIBRATION_DATA, dict):
+        return None
+
+    mm_per_ml = SYRINGE_CALIBRATION_DATA.get('mm_per_ml')
+    try:
+        mm_per_ml = float(mm_per_ml)
+        draw_mm = float(draw_mm)
+    except (TypeError, ValueError):
+        return None
+
+    if mm_per_ml <= 0:
+        return None
+    return max(0.0, draw_mm / mm_per_ml)
+
+
+def calculate_dynamic_syringe_wait_seconds(draw_mm=None, amount_ml=None):
+    runtime_config = _load_runtime_wait_settings()
+    try:
+        base_wait_s = max(0.0, float(runtime_config.get('syringe_wait_base_s', 2.0)))
+    except (TypeError, ValueError):
+        base_wait_s = 2.0
+
+    curve_points = _syringe_wait_curve_points()
+    if curve_points:
+        fallback_wait_s = base_wait_s + max(0.0, float(curve_points[-1][1]))
+    else:
+        fallback_wait_s = base_wait_s
+
+    ml_value = amount_ml
+    if ml_value is None and draw_mm is not None:
+        ml_value = _ml_from_draw_mm(draw_mm)
+
+    try:
+        if ml_value is None:
+            return fallback_wait_s
+        ml_value = float(ml_value)
+    except (TypeError, ValueError):
+        return fallback_wait_s
+
+    curve_wait_s = _interpolate_wait_curve_seconds(ml_value)
+    return base_wait_s + curve_wait_s
+
 
 def run_syringe_job(syringe_screen, draw_mm, status_fn, z_to_zero_fn, z_to_endstop_fn):
     """Execute a complete syringe draw job.
@@ -234,7 +374,7 @@ def run_syringe_job(syringe_screen, draw_mm, status_fn, z_to_zero_fn, z_to_endst
       3. Draw pre_air_mm (Luft vorsaugen)
       4. Move Z to endstop / into liquid (using z_to_endstop_fn)
       5. Draw draw_mm of liquid
-      6. Dwell (calibration_dwell_s seconds)
+    6. Dynamic dwell based on volume + safety base time
       7. Move Z back to zero
       8. Draw post_air_mm (Zusatz-Luft)
 
@@ -264,7 +404,8 @@ def run_syringe_job(syringe_screen, draw_mm, status_fn, z_to_zero_fn, z_to_endst
     except (TypeError, ValueError):
         post_air_mm = float(defaults.get('post_air_mm', 2.0))
 
-    dwell_s = float(CONFIG.get('calibration_dwell_s', 10.0))
+    dwell_s = calculate_dynamic_syringe_wait_seconds(draw_mm=draw_mm)
+    ml_value = _ml_from_draw_mm(draw_mm)
     draw_sign = -syringe_screen._home_search_sign()
 
     def _draw_relative(distance_mm, error_msg):
@@ -306,7 +447,10 @@ def run_syringe_job(syringe_screen, draw_mm, status_fn, z_to_zero_fn, z_to_endst
         return False
 
     # Step 6: dwell before lifting Z
-    status_fn(f"Warte {dwell_s:.0f}s vor Z-Auffahrt...")
+    if ml_value is None:
+        status_fn(f"Warte {dwell_s:.1f}s vor Z-Auffahrt...")
+    else:
+        status_fn(f"Warte {dwell_s:.1f}s vor Z-Auffahrt ({ml_value:.1f} ml)...")
     time.sleep(max(0.0, dwell_s))
 
     # Step 7: Z back to zero
@@ -2436,7 +2580,6 @@ class SyringeCalibrationPopup(Popup):
         self.z_zero_tolerance_mm = float(CONFIG.get('z_zero_tolerance_mm', 0.15))
         self.z_settle_time_s = float(CONFIG.get('z_settle_time_s', 1.0))
         self.z_wait_timeout_s = float(CONFIG.get('z_wait_timeout_s', 180.0))
-        self.calibration_dwell_s = float(CONFIG.get('calibration_dwell_s', 10.0))
         self.travel_distances = (30.0, 80.0, 130.0)
         self.measure_inputs = {}
         self.output_buttons = {}
@@ -3752,7 +3895,7 @@ class HomeScreen(Screen):
             post_air_mm = float(defaults.get('post_air_mm', 2.0))
 
         syringe_speed = max(0.1, float(CONFIG.get('syringe_speed_mm_s', 2.0)))
-        dwell_s = max(0.0, float(CONFIG.get('calibration_dwell_s', 10.0)))
+        dwell_s = calculate_dynamic_syringe_wait_seconds(amount_ml=amount_ml)
 
         syringe_time = (abs(pre_air_mm) + abs(draw_mm) + abs(post_air_mm)) / syringe_speed
         z_home_and_lift_s = 16.0
