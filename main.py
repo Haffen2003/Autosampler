@@ -4044,12 +4044,28 @@ class CocktailRecipePopup(Popup):
                 self.title = canonical_name
 
         logging.info(
-            "Cocktail popup loaded: requested_name='%s', cocktail_id=%s, resolved_name='%s', recipe_rows=%d",
+            "Cocktail popup loaded: requested_name='%s', cocktail_id=%s, resolved_name='%s', recipe_rows=%d, db='%s'",
             cocktail_name,
             self.cocktail_id,
             self.cocktail_name,
-            len(recipe_rows)
+            len(recipe_rows),
+            COCKTAIL_DB_FILE
         )
+
+        if recipe_rows:
+            for row in recipe_rows:
+                logging.info(
+                    "Cocktail popup row: cocktail_id=%s, ingredient='%s', amount_ml=%s",
+                    row.get('cocktail_id'),
+                    row.get('ingredient_name'),
+                    row.get('amount_ml')
+                )
+        else:
+            logging.warning(
+                "Cocktail popup has no recipe rows: requested_name='%s', cocktail_id=%s",
+                cocktail_name,
+                self.cocktail_id
+            )
 
         recipe_text = []
         for row in recipe_rows:
