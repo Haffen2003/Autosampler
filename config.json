@@ -21,7 +21,7 @@
   "z_zero_tolerance_mm": 0.15,
   "z_settle_time_s": 1.0,
   "z_wait_timeout_s": 180.0,
-  "syringe_wait_base_s": 2.0,
+  "syringe_wait_base_s": 4.0,
   "syringe_wait_curve": [
     {
       "ml": 30.0,
