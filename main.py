@@ -49,6 +49,7 @@ def load_config():
         'enable_cocktail_screen': False,
         'z_safety_enabled': True,
         'z_move_speed_mm_min': 1200.0,
+        'syringe_pre_air_ml': 0.0,
         'syringe_wait_base_s': 2.0,
         'syringe_wait_curve': [
             {'ml': 30.0, 'seconds': 7.0},
@@ -334,6 +335,41 @@ def _ml_from_draw_mm(draw_mm):
     return max(0.0, draw_mm / mm_per_ml)
 
 
+def _mm_from_ml(ml_value):
+    if not isinstance(SYRINGE_CALIBRATION_DATA, dict):
+        return None
+
+    mm_per_ml = SYRINGE_CALIBRATION_DATA.get('mm_per_ml')
+    try:
+        mm_per_ml = float(mm_per_ml)
+        ml_value = float(ml_value)
+    except (TypeError, ValueError):
+        return None
+
+    if mm_per_ml <= 0:
+        return None
+    return max(0.0, ml_value * mm_per_ml)
+
+
+def _resolve_pre_air_mm(default_pre_air_mm):
+    pre_air_ml = CONFIG.get('syringe_pre_air_ml')
+    if pre_air_ml is None:
+        return max(0.0, float(default_pre_air_mm))
+
+    try:
+        pre_air_ml = max(0.0, float(pre_air_ml))
+    except (TypeError, ValueError):
+        logging.warning("Invalid syringe_pre_air_ml in config; using calibration pre_air_mm")
+        return max(0.0, float(default_pre_air_mm))
+
+    pre_air_mm = _mm_from_ml(pre_air_ml)
+    if pre_air_mm is None:
+        logging.warning("syringe_pre_air_ml configured but calibration missing; using calibration pre_air_mm")
+        return max(0.0, float(default_pre_air_mm))
+
+    return max(0.0, float(pre_air_mm))
+
+
 def calculate_dynamic_syringe_wait_seconds(draw_mm=None, amount_ml=None):
     runtime_config = _load_runtime_wait_settings()
     try:
@@ -399,6 +435,7 @@ def run_syringe_job(syringe_screen, draw_mm, status_fn, z_to_zero_fn, z_to_endst
         pre_air_mm = float(sequence.get('pre_air_mm', defaults.get('pre_air_mm', 10.0)))
     except (TypeError, ValueError):
         pre_air_mm = float(defaults.get('pre_air_mm', 10.0))
+    pre_air_mm = _resolve_pre_air_mm(pre_air_mm)
     try:
         post_air_mm = float(sequence.get('post_air_mm', defaults.get('post_air_mm', 2.0)))
     except (TypeError, ValueError):
@@ -430,7 +467,11 @@ def run_syringe_job(syringe_screen, draw_mm, status_fn, z_to_zero_fn, z_to_endst
         return False
 
     # Step 3: pre-air
-    status_fn(f"Luft vorsaugen: {pre_air_mm:.1f} mm")
+    pre_air_ml = _ml_from_draw_mm(pre_air_mm)
+    if pre_air_ml is None:
+        status_fn(f"Luft vorsaugen: {pre_air_mm:.1f} mm")
+    else:
+        status_fn(f"Luft vorsaugen: {pre_air_mm:.1f} mm ({pre_air_ml:.2f} ml)")
     if not _draw_relative(draw_sign * pre_air_mm, "Fehler: Vorzug-Luft fehlgeschlagen"):
         status_fn("Fehler: Vorzug-Luft fehlgeschlagen")
         return False
@@ -3888,6 +3929,7 @@ class HomeScreen(Screen):
             pre_air_mm = float(sequence.get('pre_air_mm', defaults.get('pre_air_mm', 10.0)))
         except (TypeError, ValueError):
             pre_air_mm = float(defaults.get('pre_air_mm', 10.0))
+        pre_air_mm = _resolve_pre_air_mm(pre_air_mm)
 
         try:
             post_air_mm = float(sequence.get('post_air_mm', defaults.get('post_air_mm', 2.0)))
@@ -3916,6 +3958,7 @@ class HomeScreen(Screen):
             pre_air_mm = float(sequence.get('pre_air_mm', 10.0))
         except (TypeError, ValueError):
             pre_air_mm = 10.0
+        pre_air_mm = _resolve_pre_air_mm(pre_air_mm)
 
         try:
             post_air_mm = float(sequence.get('post_air_mm', 2.0))
