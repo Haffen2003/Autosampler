@@ -1942,8 +1942,14 @@ class PreparationScreen(Screen):
 class MotorPositionScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.default_slot_speed = 8000.0
-        self.max_slot_speed = 8000.0
+        self.default_slot_speed = float(CONFIG.get('slot_default_speed_mm_min', 8000.0))
+        self.max_slot_speed = float(CONFIG.get('slot_max_speed_mm_min', 8000.0))
+        if self.default_slot_speed <= 0:
+            self.default_slot_speed = 8000.0
+        if self.max_slot_speed <= 0:
+            self.max_slot_speed = 8000.0
+        if self.default_slot_speed > self.max_slot_speed:
+            self.default_slot_speed = self.max_slot_speed
         self._speed_editing = False
         self.positions = self.load_positions()
         self.selected_circle = None
