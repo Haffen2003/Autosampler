@@ -46,6 +46,7 @@ def load_config():
     return {
         'moonraker_url': 'http://localhost:7125',
         'icon_dir': 'Icons',
+        'touch_transform_mouse_events': False,
         'enable_cocktail_screen': False,
         'z_safety_enabled': True,
         'z_move_speed_mm_min': 1200.0,
@@ -64,7 +65,7 @@ def load_config():
 CONFIG = load_config()
 MOONRAKER_URL = CONFIG.get('moonraker_url', 'http://localhost:7125')
 TOUCH_ROTATION = int(CONFIG.get('touch_rotation', 180))
-TOUCH_TRANSFORM_MOUSE_EVENTS = bool(CONFIG.get('touch_transform_mouse_events', True))
+TOUCH_TRANSFORM_MOUSE_EVENTS = bool(CONFIG.get('touch_transform_mouse_events', False))
 ENABLE_COCKTAIL_SCREEN = bool(CONFIG.get('enable_cocktail_screen', False))
 CALIBRATION_FILE = "calibration.json"
 
@@ -3763,7 +3764,7 @@ class HomeScreen(Screen):
         root.add_widget(title)
 
         subtitle = Label(
-            text="Ausgegraute Cocktails haben fehlende Zutaten-Zuordnungen. Start im Popup nur mit Zutaten + Rinse + Ende.",
+            text="Angezeigt werden nur Cocktails mit vollständig belegten Zutaten-Positionen.",
             size_hint_y=None,
             height=28,
             font_size=16,
@@ -4165,11 +4166,23 @@ class HomeScreen(Screen):
             self.status_label.text = "Keine Cocktails in Datenbank gefunden."
             return
 
-        loaded_count = 0
+        filtered_cocktails = []
+        hidden_count = 0
         for cocktail in cocktails:
+            cocktail_name = cocktail['name']
+            if not cocktail_is_available(cocktail_name):
+                hidden_count += 1
+                continue
+            filtered_cocktails.append(cocktail)
+
+        if not filtered_cocktails:
+            self.status_label.text = "Keine Cocktails mit vollständigen Zutaten-Positionen vorhanden."
+            return
+
+        loaded_count = 0
+        for cocktail in filtered_cocktails:
             cocktail_id = int(cocktail['id'])
             cocktail_name = cocktail['name']
-            is_available = cocktail_is_available(cocktail_name)
             card = BoxLayout(
                 orientation='vertical',
                 size_hint=(None, None),
@@ -4189,23 +4202,20 @@ class HomeScreen(Screen):
                 background_color=(1, 1, 1, 1),
                 border=(0, 0, 0, 0)
             )
-            cocktail_button.disabled = not is_available
-            cocktail_button.opacity = 1.0 if is_available else 0.32
-            if is_available:
-                cocktail_button.bind(
-                    on_press=partial(
-                        self.on_cocktail_icon_pressed,
-                        cocktail_name=cocktail_name,
-                        cocktail_id=cocktail_id
-                    )
+            cocktail_button.bind(
+                on_press=partial(
+                    self.on_cocktail_icon_pressed,
+                    cocktail_name=cocktail_name,
+                    cocktail_id=cocktail_id
                 )
+            )
 
             name_label = Label(
                 text=cocktail_name,
                 size_hint_y=None,
                 height=36,
                 font_size=16,
-                color=[1, 1, 1, 1] if is_available else [0.55, 0.55, 0.55, 1],
+                color=[1, 1, 1, 1],
                 halign='center',
                 valign='middle'
             )
@@ -4218,7 +4228,10 @@ class HomeScreen(Screen):
             self.grid.add_widget(card)
             loaded_count += 1
 
-        self.status_label.text = f"{loaded_count} Cocktails aus Datenbank geladen"
+        if hidden_count > 0:
+            self.status_label.text = f"{loaded_count} startbare Cocktails geladen ({hidden_count} ausgeblendet)"
+        else:
+            self.status_label.text = f"{loaded_count} Cocktails aus Datenbank geladen"
 
     def on_cocktail_icon_pressed(self, _instance, cocktail_name, cocktail_id=None):
         popup = CocktailRecipePopup(self, cocktail_name, cocktail_id=cocktail_id)
@@ -4542,13 +4555,13 @@ class CocktailFinishedPopup(Popup):
             background_color=(0.2, 0.5, 0.9, 1)
         )
         self.skip_btn = Button(
-            text="Überspringen",
+            text="Schließen",
             font_size=18,
             background_normal='',
             background_down='',
-            background_color=(0.5, 0.5, 0.5, 1)
+            background_color=(0.2, 0.65, 0.25, 1)
         )
-        self.rinse_btn.bind(on_press=self._run_rinse)
+        self.rinse_btn.bind(on_press=self._start_rinse)
         self.skip_btn.bind(on_press=lambda _btn: self.dismiss())
         button_row.add_widget(self.rinse_btn)
         button_row.add_widget(self.skip_btn)
@@ -4557,22 +4570,41 @@ class CocktailFinishedPopup(Popup):
         self.content = root
 
     def _set_busy(self, busy):
-        self.rinse_btn.disabled = bool(busy)
-        self.skip_btn.disabled = bool(busy)
-        self.rinse_btn.opacity = 0.45 if busy else 1.0
-        self.skip_btn.opacity = 0.45 if busy else 1.0
+        self.rinse_btn.disabled = busy
+        self.skip_btn.disabled = busy
+        self.rinse_btn.opacity = 0.5 if busy else 1.0
+        self.skip_btn.opacity = 0.5 if busy else 1.0
 
-    def _run_rinse(self, _instance):
+    def _start_rinse(self, _instance):
         self._set_busy(True)
-        self.status_label.text = "Spülvorgang startet..."
-        success = self.home_screen.run_rinse_cycle(rinse_ml=50.0)
-        if success:
-            self.status_label.text = "Spülen abgeschlossen"
-            self.dismiss()
-            return
+        self.status_label.text = "Spülvorgang läuft..."
 
-        self.status_label.text = "Spülen fehlgeschlagen"
-        self._set_busy(False)
+        def _worker():
+            try:
+                rinse_ok = bool(self.home_screen.run_rinse_cycle())
+            except Exception as exc:
+                logging.exception("Rinse cycle failed from finished popup")
+                rinse_ok = False
+                error_msg = str(exc)
+            else:
+                error_msg = None
+
+            def _finish_ui(_dt):
+                if rinse_ok:
+                    self.status_label.text = "Spülen abgeschlossen"
+                    self._set_busy(False)
+                    self.dismiss()
+                    return
+
+                if error_msg:
+                    self.status_label.text = f"Spülen fehlgeschlagen: {error_msg}"
+                else:
+                    self.status_label.text = "Spülen fehlgeschlagen"
+                self._set_busy(False)
+
+            Clock.schedule_once(_finish_ui, 0)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
 class GCodeScreen(Screen):
     def __init__(self, **kwargs):
