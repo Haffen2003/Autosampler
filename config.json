@@ -3,6 +3,7 @@
   "icon_dir": "Icons",
   "enable_cocktail_screen": false,
   "touch_rotation": 180,
+  "end_position_wait_seconds": 2.0,
   "z_safety_enabled": true,
   "z_endstop_clearance_mm": 10.0,
   "z_move_speed_mm_min": 7000.0,

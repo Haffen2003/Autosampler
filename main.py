@@ -47,6 +47,7 @@ def load_config():
         'moonraker_url': 'http://localhost:7125',
         'icon_dir': 'Icons',
         'touch_transform_mouse_events': False,
+        'end_position_wait_seconds': 0.0,
         'enable_cocktail_screen': False,
         'z_safety_enabled': True,
         'z_move_speed_mm_min': 1200.0,
@@ -4117,6 +4118,14 @@ class HomeScreen(Screen):
         command_overhead_s = 0.35
         return command_overhead_s + (distance_mm / speed_mm_s)
 
+    def _get_end_position_wait_seconds(self):
+        runtime_config = _load_runtime_wait_settings()
+        try:
+            wait_s = float(runtime_config.get('end_position_wait_seconds', 0.0))
+        except (TypeError, ValueError):
+            wait_s = 0.0
+        return max(0.0, wait_s)
+
     def build_cocktail_phase_estimates(self, plan, end_position):
         if not plan:
             return []
@@ -4124,8 +4133,9 @@ class HomeScreen(Screen):
         slot_positions = self._load_slot_positions()
         phases = []
         previous_slot = None
+        end_wait_s = self._get_end_position_wait_seconds()
 
-        for step in plan:
+        for index, step in enumerate(plan):
             ingredient_slot = str(step.get('position_name', '')).strip()
             amount_ml = float(step.get('amount_ml', 0.0))
 
@@ -4133,12 +4143,14 @@ class HomeScreen(Screen):
             phases.append(max(1.0, self._estimate_ingredient_step_seconds(amount_ml)))
             phases.append(max(0.5, self._estimate_xy_seconds_between_slots(slot_positions, ingredient_slot, end_position)))
             phases.append(max(1.0, self._estimate_dispense_seconds(amount_ml)))
+            if index < (len(plan) - 1) and end_wait_s > 0.0:
+                phases.append(end_wait_s)
 
             previous_slot = end_position
 
         return phases
 
-    def _dispense_current_load_to_end(self, context_name, end_position):
+    def _dispense_current_load_to_end(self, context_name, end_position, post_output_wait_s=0.0):
         self._set_status(f"{context_name}: fahre zur Endposition {end_position} für Ausgabe")
         if not self._move_xy_to_slot(end_position):
             return False
@@ -4152,6 +4164,13 @@ class HomeScreen(Screen):
         if not syringe_screen.home_syringe(None):
             self._set_status("Fehler: Ausgabe an Endposition fehlgeschlagen")
             return False
+
+        wait_s = max(0.0, float(post_output_wait_s or 0.0))
+        if wait_s > 0.0:
+            self._set_status(
+                f"{context_name}: warte {wait_s:.1f} s an Endposition fuer vollständiges Auslaufen"
+            )
+            time.sleep(wait_s)
 
         motor_screen = self._get_motor_screen()
         if motor_screen is None:
@@ -4181,6 +4200,7 @@ class HomeScreen(Screen):
         phase_estimates = self.build_cocktail_phase_estimates(plan, end_position)
         total_phases = max(1, len(phase_estimates))
         done_phases = 0
+        end_wait_s = self._get_end_position_wait_seconds()
 
         def _report_progress(message, completed):
             completed_clamped = max(0, min(int(completed), total_phases))
@@ -4193,7 +4213,7 @@ class HomeScreen(Screen):
 
         _report_progress(f"{cocktail_name}: Start", 0)
 
-        for step in plan:
+        for index, step in enumerate(plan):
             position_name = step['position_name']
             ingredient_name = step['ingredient_name']
             amount_ml = step['amount_ml']
@@ -4214,10 +4234,19 @@ class HomeScreen(Screen):
             _report_progress(f"{ingredient_name} aufgenommen", done_phases)
 
             _report_progress(f"Bringe {ingredient_name} zur Endposition", done_phases)
-            if not self._dispense_current_load_to_end(cocktail_name, end_position):
+            wait_after_output_s = end_wait_s if index < (len(plan) - 1) else 0.0
+            if not self._dispense_current_load_to_end(
+                cocktail_name,
+                end_position,
+                post_output_wait_s=wait_after_output_s
+            ):
                 return False
             done_phases += 2
             _report_progress(f"{ingredient_name} an Endposition ausgegeben", done_phases)
+
+            if index < (len(plan) - 1) and end_wait_s > 0.0:
+                done_phases += 1
+                _report_progress("Wartezeit beendet", done_phases)
 
         self._set_status(f"{cocktail_name}: Reihenfolge vollständig abgearbeitet")
         _report_progress(f"{cocktail_name} abgeschlossen", total_phases)
