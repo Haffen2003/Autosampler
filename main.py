@@ -884,6 +884,50 @@ def save_cocktail_recipe(cocktail_name, ingredients):
     return True
 
 
+def update_cocktail_amounts_by_id(cocktail_id, ingredient_amount_updates):
+    """Update ingredient amounts for a cocktail directly in SQLite by cocktail id."""
+    try:
+        normalized_cocktail_id = int(cocktail_id)
+    except (TypeError, ValueError):
+        return False
+
+    if not isinstance(ingredient_amount_updates, dict) or not ingredient_amount_updates:
+        return False
+
+    initialize_cocktail_database()
+    with _db_connect() as connection:
+        cursor = connection.cursor()
+        cursor.execute("SELECT id FROM cocktails WHERE id = ?", (normalized_cocktail_id,))
+        if cursor.fetchone() is None:
+            return False
+
+        updated_rows = 0
+        for ingredient_id, amount_ml in ingredient_amount_updates.items():
+            try:
+                ingredient_id_int = int(ingredient_id)
+                amount_value = float(amount_ml)
+            except (TypeError, ValueError):
+                continue
+
+            if amount_value <= 0:
+                continue
+
+            cursor.execute(
+                """
+                UPDATE cocktail_ingredients
+                SET amount_ml = ?
+                WHERE cocktail_id = ? AND ingredient_id = ?
+                """,
+                (amount_value, normalized_cocktail_id, ingredient_id_int)
+            )
+            if cursor.rowcount > 0:
+                updated_rows += 1
+
+        connection.commit()
+
+    return updated_rows > 0
+
+
 def save_cocktails(data):
     """Persist cocktails to SQLite for compatibility with existing UI."""
     initialize_cocktail_database()
@@ -1301,6 +1345,53 @@ class TouchSpinnerOption(SpinnerOption):
         self.size_hint_y = None
         self.height = max(self.height, dp(52))
         self.font_size = max(float(self.font_size or 0), 18)
+
+
+class RotatedTouchPopup(Popup):
+    """Popup that applies the same touch-rotation handling as the main screen."""
+    def _transform_touch_if_needed(self, touch):
+        if TOUCH_ROTATION % 360 == 0:
+            return False
+
+        device_name = str(getattr(touch, 'device', '')).lower()
+        if 'mouse' in device_name and not TOUCH_TRANSFORM_MOUSE_EVENTS:
+            return False
+
+        width, height = Window.size
+        if TOUCH_ROTATION % 360 == 180:
+            touch.apply_transform_2d(lambda x, y: (width - x, height - y))
+            return True
+        if TOUCH_ROTATION % 360 == 90:
+            touch.apply_transform_2d(lambda x, y: (y, width - x))
+            return True
+        if TOUCH_ROTATION % 360 == 270:
+            touch.apply_transform_2d(lambda x, y: (height - y, x))
+            return True
+        return False
+
+    def on_touch_down(self, touch):
+        touch.push()
+        try:
+            self._transform_touch_if_needed(touch)
+            return super().on_touch_down(touch)
+        finally:
+            touch.pop()
+
+    def on_touch_move(self, touch):
+        touch.push()
+        try:
+            self._transform_touch_if_needed(touch)
+            return super().on_touch_move(touch)
+        finally:
+            touch.pop()
+
+    def on_touch_up(self, touch):
+        touch.push()
+        try:
+            self._transform_touch_if_needed(touch)
+            return super().on_touch_up(touch)
+        finally:
+            touch.pop()
 
 class CocktailInputScreen(Screen):
     def __init__(self, **kwargs):
@@ -4238,7 +4329,7 @@ class HomeScreen(Screen):
         popup.open()
 
 
-class CocktailRecipePopup(Popup):
+class CocktailRecipePopup(RotatedTouchPopup):
     def __init__(self, home_screen, cocktail_name, cocktail_id=None, **kwargs):
         super().__init__(**kwargs)
         self.home_screen = home_screen
@@ -4247,6 +4338,7 @@ class CocktailRecipePopup(Popup):
         self.title = cocktail_name
         self.size_hint = (0.9, 0.86)
         self.auto_dismiss = False
+        self.recipe_rows = []
 
         root = BoxLayout(orientation='vertical', padding=[16, 16, 16, 16], spacing=12)
 
@@ -4268,11 +4360,14 @@ class CocktailRecipePopup(Popup):
         right_box = BoxLayout(orientation='vertical', spacing=8, size_hint=(0.54, 1))
 
         recipe_rows = get_cocktail_recipe_by_id(self.cocktail_id) if self.cocktail_id is not None else get_cocktail_recipe(cocktail_name)
+        self.recipe_rows = recipe_rows
         if recipe_rows:
             canonical_name = recipe_rows[0].get('cocktail_name')
             if canonical_name:
                 self.cocktail_name = canonical_name
                 self.title = canonical_name
+            if self.cocktail_id is None:
+                self.cocktail_id = recipe_rows[0].get('cocktail_id')
 
         logging.info(
             "Cocktail popup loaded: requested_name='%s', cocktail_id=%s, resolved_name='%s', recipe_rows=%d, db='%s'",
@@ -4299,7 +4394,7 @@ class CocktailRecipePopup(Popup):
             )
 
         recipe_text = []
-        for row in recipe_rows:
+        for row in self.recipe_rows:
             recipe_text.append(f"{row['ingredient_name']}: {_format_amount_ml(row['amount_ml'])} ml")
 
         ingredients_title = Label(
@@ -4322,6 +4417,7 @@ class CocktailRecipePopup(Popup):
             color=[1, 1, 1, 1]
         )
         recipe_label.bind(size=lambda inst, _value: setattr(inst, 'text_size', inst.size))
+        self.recipe_label = recipe_label
         right_box.add_widget(recipe_label)
 
         requirements = get_cocktail_start_requirements(cocktail_name)
@@ -4370,6 +4466,13 @@ class CocktailRecipePopup(Popup):
             background_down='',
             background_color=(0.82, 0.15, 0.15, 1)
         )
+        edit_btn = Button(
+            text="Edit",
+            font_size=18,
+            background_normal='',
+            background_down='',
+            background_color=(0.95, 0.58, 0.12, 1)
+        )
         start_btn = Button(
             text="Start",
             font_size=18,
@@ -4380,8 +4483,10 @@ class CocktailRecipePopup(Popup):
         )
         start_btn.opacity = 1.0 if self.cocktail_can_start else 0.45
         start_btn.bind(on_press=self._start_cocktail)
+        edit_btn.bind(on_press=self._open_edit_popup)
         close_btn.bind(on_press=lambda _btn: self.dismiss())
         button_row.add_widget(close_btn)
+        button_row.add_widget(edit_btn)
         button_row.add_widget(start_btn)
         root.add_widget(button_row)
 
@@ -4394,8 +4499,162 @@ class CocktailRecipePopup(Popup):
         progress_popup.open()
         progress_popup.start()
 
+    def _refresh_recipe_after_edit(self):
+        if self.cocktail_id is None:
+            refreshed_rows = get_cocktail_recipe(self.cocktail_name)
+        else:
+            refreshed_rows = get_cocktail_recipe_by_id(self.cocktail_id)
 
-class CocktailProgressPopup(Popup):
+        self.recipe_rows = refreshed_rows
+        recipe_text = []
+        for row in self.recipe_rows:
+            recipe_text.append(f"{row['ingredient_name']}: {_format_amount_ml(row['amount_ml'])} ml")
+        self.recipe_label.text = "\n".join(recipe_text) if recipe_text else "Kein Rezept gefunden"
+        self.status_label.text = "Mengen gespeichert"
+
+    def _open_edit_popup(self, _instance):
+        if not self.recipe_rows:
+            self.status_label.text = "Kein Rezept zum Bearbeiten vorhanden"
+            return
+        if self.cocktail_id is None:
+            self.status_label.text = "Cocktail-ID fehlt, Bearbeiten nicht möglich"
+            return
+
+        edit_popup = CocktailRecipeEditPopup(
+            cocktail_name=self.cocktail_name,
+            cocktail_id=self.cocktail_id,
+            recipe_rows=self.recipe_rows,
+            on_saved=self._refresh_recipe_after_edit
+        )
+        edit_popup.open()
+
+
+class CocktailRecipeEditPopup(RotatedTouchPopup):
+    def __init__(self, cocktail_name, cocktail_id, recipe_rows, on_saved=None, **kwargs):
+        super().__init__(**kwargs)
+        self.cocktail_name = cocktail_name
+        self.cocktail_id = int(cocktail_id)
+        self.recipe_rows = list(recipe_rows or [])
+        self.on_saved = on_saved
+        self.title = f"{cocktail_name} bearbeiten"
+        self.size_hint = (0.7, 0.75)
+        self.auto_dismiss = False
+        self.amount_inputs = {}
+
+        root = BoxLayout(orientation='vertical', padding=[14, 14, 14, 14], spacing=10)
+
+        info_label = Label(
+            text="Zutaten und Mengen (ml) anpassen",
+            size_hint_y=None,
+            height=30,
+            font_size=18,
+            halign='left',
+            valign='middle',
+            color=[1, 1, 1, 1]
+        )
+        info_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(info_label)
+
+        list_box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=8, padding=[2, 2, 2, 2])
+        list_box.bind(minimum_height=list_box.setter('height'))
+
+        for row in self.recipe_rows:
+            ingredient_id = int(row['ingredient_id'])
+            ingredient_name = row['ingredient_name']
+            amount_text = _format_amount_ml(row['amount_ml'])
+
+            line = BoxLayout(orientation='horizontal', size_hint_y=None, height=52, spacing=8)
+            ingredient_label = Label(
+                text=ingredient_name,
+                size_hint_x=0.62,
+                font_size=17,
+                halign='left',
+                valign='middle',
+                color=[0.95, 0.97, 1, 1]
+            )
+            ingredient_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+
+            amount_input = TextInput(
+                text=amount_text,
+                multiline=False,
+                size_hint_x=0.24,
+                font_size=18,
+                input_filter='float'
+            )
+            unit_label = Label(
+                text="ml",
+                size_hint_x=0.14,
+                font_size=16,
+                halign='left',
+                valign='middle',
+                color=[0.9, 0.95, 1, 1]
+            )
+            unit_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+
+            line.add_widget(ingredient_label)
+            line.add_widget(amount_input)
+            line.add_widget(unit_label)
+            list_box.add_widget(line)
+            self.amount_inputs[ingredient_id] = amount_input
+
+        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False, do_scroll_y=True)
+        scroll.add_widget(list_box)
+        root.add_widget(scroll)
+
+        self.status_label = Label(
+            text="",
+            size_hint_y=None,
+            height=28,
+            font_size=14,
+            halign='left',
+            valign='middle',
+            color=[0.95, 0.9, 0.6, 1]
+        )
+        self.status_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
+        root.add_widget(self.status_label)
+
+        button_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=52, spacing=10)
+        cancel_btn = Button(text="Abbrechen", font_size=17, background_normal='', background_down='', background_color=(0.45, 0.45, 0.45, 1))
+        save_btn = Button(text="Speichern", font_size=17, background_normal='', background_down='', background_color=(0.16, 0.65, 0.3, 1))
+        cancel_btn.bind(on_press=lambda _btn: self.dismiss())
+        save_btn.bind(on_press=self._save_changes)
+        button_row.add_widget(cancel_btn)
+        button_row.add_widget(save_btn)
+        root.add_widget(button_row)
+
+        self.content = root
+
+    def _save_changes(self, _instance):
+        updates = {}
+        for ingredient_id, amount_input in self.amount_inputs.items():
+            raw_text = str(amount_input.text).strip().replace(',', '.')
+            if not raw_text:
+                self.status_label.text = "Bitte alle Mengen ausfuellen"
+                return
+            try:
+                amount_value = float(raw_text)
+            except ValueError:
+                self.status_label.text = "Nur gueltige Zahlen fuer ml erlaubt"
+                return
+            if amount_value <= 0:
+                self.status_label.text = "Mengen muessen groesser als 0 sein"
+                return
+            updates[int(ingredient_id)] = amount_value
+
+        if not update_cocktail_amounts_by_id(self.cocktail_id, updates):
+            self.status_label.text = "Speichern fehlgeschlagen"
+            return
+
+        if callable(self.on_saved):
+            try:
+                self.on_saved()
+            except Exception:
+                logging.exception("Failed to refresh recipe popup after edit save")
+
+        self.dismiss()
+
+
+class CocktailProgressPopup(RotatedTouchPopup):
     def __init__(self, home_screen, cocktail_name, **kwargs):
         super().__init__(**kwargs)
         self.home_screen = home_screen
@@ -4484,7 +4743,7 @@ class CocktailProgressPopup(Popup):
             )
             error_label.bind(size=lambda inst, _v: setattr(inst, 'text_size', inst.size))
 
-            error_popup = Popup(
+            error_popup = RotatedTouchPopup(
                 title="Fehler",
                 size_hint=(0.58, 0.34),
                 auto_dismiss=True,
@@ -4512,7 +4771,7 @@ class CocktailProgressPopup(Popup):
         self._worker.start()
 
 
-class CocktailFinishedPopup(Popup):
+class CocktailFinishedPopup(RotatedTouchPopup):
     def __init__(self, home_screen, cocktail_name, **kwargs):
         super().__init__(**kwargs)
         self.home_screen = home_screen
