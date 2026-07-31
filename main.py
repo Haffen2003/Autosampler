@@ -64,6 +64,7 @@ def load_config():
 CONFIG = load_config()
 MOONRAKER_URL = CONFIG.get('moonraker_url', 'http://localhost:7125')
 TOUCH_ROTATION = int(CONFIG.get('touch_rotation', 180))
+TOUCH_TRANSFORM_MOUSE_EVENTS = bool(CONFIG.get('touch_transform_mouse_events', True))
 ENABLE_COCKTAIL_SCREEN = bool(CONFIG.get('enable_cocktail_screen', False))
 CALIBRATION_FILE = "calibration.json"
 
@@ -1262,6 +1263,7 @@ from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.slider import Slider
 from kivy.uix.spinner import Spinner
+from kivy.uix.spinner import SpinnerOption
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.anchorlayout import AnchorLayout
@@ -1280,8 +1282,8 @@ from kivy.metrics import dp
 
 
 class Button(KivyButton):
-    """Custom button with optional touch padding (0 by default to avoid overlap)."""
-    touch_padding = NumericProperty(0)
+    """Custom button with a small hitbox extension for touch ergonomics."""
+    touch_padding = NumericProperty(dp(6))
 
     def collide_point(self, x, y):
         padding = float(self.touch_padding)
@@ -1289,6 +1291,15 @@ class Button(KivyButton):
             self.x - padding <= x <= self.right + padding and
             self.y - padding <= y <= self.top + padding
         )
+
+
+class TouchSpinnerOption(SpinnerOption):
+    """Touch-friendly spinner entries with larger vertical tap area."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.size_hint_y = None
+        self.height = max(self.height, dp(52))
+        self.font_size = max(float(self.font_size or 0), 18)
 
 class CocktailInputScreen(Screen):
     def __init__(self, **kwargs):
@@ -1596,7 +1607,9 @@ class PreparationScreen(Screen):
             values=cocktail_names,
             size_hint_y=None,
             height=50,
-            font_size=18
+            font_size=18,
+            option_cls=TouchSpinnerOption,
+            sync_height=True
         )
         self.spinner.bind(text=self.show_ingredients)
 
@@ -4180,7 +4193,7 @@ class HomeScreen(Screen):
             cocktail_button.opacity = 1.0 if is_available else 0.32
             if is_available:
                 cocktail_button.bind(
-                    on_release=partial(
+                    on_press=partial(
                         self.on_cocktail_icon_pressed,
                         cocktail_name=cocktail_name,
                         cocktail_id=cocktail_id
@@ -4813,7 +4826,7 @@ class MainScreen(BoxLayout):
             return False
 
         device_name = str(getattr(touch, 'device', '')).lower()
-        if 'mouse' in device_name:
+        if 'mouse' in device_name and not TOUCH_TRANSFORM_MOUSE_EVENTS:
             return False
 
         width, height = Window.size
